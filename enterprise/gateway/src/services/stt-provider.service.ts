@@ -41,6 +41,18 @@ export async function upsertSttProviderHandler(opts: {
       }
     : {};
 
+  const cfFields = {
+    cfAccessClientId: provider.cfAccessClientId ?? "",
+    ...(provider.cfAccessClientSecret
+      ? {
+          cfAccessClientSecretEncrypted: encryptApiKey(
+            provider.cfAccessClientSecret,
+            getEncryptionSecret(),
+          ),
+        }
+      : {}),
+  };
+
   await upsertSttProvider({
     id: provider.id || uuid(),
     provider: provider.provider,
@@ -49,6 +61,7 @@ export async function upsertSttProviderHandler(opts: {
     ...apiKeyFields,
     model: provider.model,
     tier: provider.tier,
+    ...cfFields,
   });
 
   return {};

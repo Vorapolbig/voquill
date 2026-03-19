@@ -14,6 +14,7 @@ function rowToSttProvider(row: SttProviderRow): SttProvider {
     pullStatus: row.pull_status as SttProvider["pullStatus"],
     pullError: row.pull_error,
     createdAt: row.created_at.toISOString(),
+    cfAccessClientId: row.cf_access_client_id,
   };
 }
 
@@ -34,6 +35,8 @@ export async function upsertSttProvider(opts: {
   apiKeySuffix?: string;
   model: string;
   tier: number;
+  cfAccessClientId?: string;
+  cfAccessClientSecretEncrypted?: string;
 }): Promise<void> {
   const pool = getPool();
   const existing = await pool.query(
@@ -43,8 +46,8 @@ export async function upsertSttProvider(opts: {
 
   if (existing.rows.length === 0) {
     await pool.query(
-      `INSERT INTO stt_providers (id, provider, name, url, api_key_encrypted, api_key_suffix, model, tier)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      `INSERT INTO stt_providers (id, provider, name, url, api_key_encrypted, api_key_suffix, model, tier, cf_access_client_id, cf_access_client_secret_encrypted)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         opts.id,
         opts.provider,
@@ -54,12 +57,14 @@ export async function upsertSttProvider(opts: {
         opts.apiKeySuffix ?? "",
         opts.model,
         opts.tier,
+        opts.cfAccessClientId ?? "",
+        opts.cfAccessClientSecretEncrypted ?? "",
       ],
     );
   } else if (opts.apiKeyEncrypted) {
     await pool.query(
-      `UPDATE stt_providers SET provider = $1, name = $2, url = $3, api_key_encrypted = $4, api_key_suffix = $5, model = $6, tier = $7, pull_status = 'in_progress', pull_error = NULL
-       WHERE id = $8`,
+      `UPDATE stt_providers SET provider = $1, name = $2, url = $3, api_key_encrypted = $4, api_key_suffix = $5, model = $6, tier = $7, cf_access_client_id = $8, cf_access_client_secret_encrypted = $9, pull_status = 'in_progress', pull_error = NULL
+       WHERE id = $10`,
       [
         opts.provider,
         opts.name,
@@ -68,14 +73,25 @@ export async function upsertSttProvider(opts: {
         opts.apiKeySuffix,
         opts.model,
         opts.tier,
+        opts.cfAccessClientId ?? "",
+        opts.cfAccessClientSecretEncrypted ?? "",
         opts.id,
       ],
     );
   } else {
     await pool.query(
-      `UPDATE stt_providers SET provider = $1, name = $2, url = $3, model = $4, tier = $5, pull_status = 'in_progress', pull_error = NULL
-       WHERE id = $6`,
-      [opts.provider, opts.name, opts.url, opts.model, opts.tier, opts.id],
+      `UPDATE stt_providers SET provider = $1, name = $2, url = $3, model = $4, tier = $5, cf_access_client_id = $6, cf_access_client_secret_encrypted = $7, pull_status = 'in_progress', pull_error = NULL
+       WHERE id = $8`,
+      [
+        opts.provider,
+        opts.name,
+        opts.url,
+        opts.model,
+        opts.tier,
+        opts.cfAccessClientId ?? "",
+        opts.cfAccessClientSecretEncrypted ?? "",
+        opts.id,
+      ],
     );
   }
 }

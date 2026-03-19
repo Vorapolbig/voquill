@@ -50,17 +50,38 @@ export class SpeachesSttApi extends BaseSttApi {
   private model: string;
   private baseURL: string;
   private apiKey: string;
+  private cfAccessClientId: string;
+  private cfAccessClientSecret: string;
 
-  constructor(opts: { url: string; apiKey: string; model: string }) {
+  constructor(opts: {
+    url: string;
+    apiKey: string;
+    model: string;
+    cfAccessClientId?: string;
+    cfAccessClientSecret?: string;
+  }) {
     super();
     const url = `${opts.url}/v1`;
+    this.cfAccessClientId = opts.cfAccessClientId ?? "";
+    this.cfAccessClientSecret = opts.cfAccessClientSecret ?? "";
     this.client = new OpenAI({
       baseURL: url,
       apiKey: opts.apiKey,
+      defaultHeaders: this.cfHeaders(),
     });
     this.model = opts.model;
     this.baseURL = url;
     this.apiKey = opts.apiKey;
+  }
+
+  private cfHeaders(): Record<string, string> {
+    if (!this.cfAccessClientId || !this.cfAccessClientSecret) {
+      return {};
+    }
+    return {
+      "CF-Access-Client-Id": this.cfAccessClientId,
+      "CF-Access-Client-Secret": this.cfAccessClientSecret,
+    };
   }
 
   async transcribe(input: TranscribeInput): Promise<{ text: string }> {
@@ -83,6 +104,7 @@ export class SpeachesSttApi extends BaseSttApi {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
+          ...this.cfHeaders(),
         },
       });
       if (res.ok) {

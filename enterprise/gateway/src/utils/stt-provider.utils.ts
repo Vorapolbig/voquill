@@ -14,11 +14,17 @@ export function createTranscriptionApi(
   switch (row.provider) {
     case "groq":
       return new GroqSttApi({ apiKey, model: row.model });
-    default:
+    default: {
+      const cfAccessClientSecret = row.cf_access_client_secret_encrypted
+        ? decryptApiKey(row.cf_access_client_secret_encrypted, getEncryptionSecret())
+        : "";
       return new SpeachesSttApi({
         url: row.url,
         apiKey,
         model: row.model,
+        cfAccessClientId: row.cf_access_client_id,
+        cfAccessClientSecret,
       });
+    }
   }
 }

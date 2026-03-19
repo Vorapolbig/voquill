@@ -10,4 +10,6 @@ export type SttProviderRow = {
   pull_status: string;
   pull_error: string | null;
   created_at: Date;
+  cf_access_client_id: string;
+  cf_access_client_secret_encrypted: string;
 };

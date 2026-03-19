@@ -12,6 +12,7 @@ export type SttProvider = {
   pullStatus: PullStatus;
   pullError: string | null;
   createdAt: string;
+  cfAccessClientId: string;
 };
 
 export type SttProviderInput = {
@@ -22,6 +23,8 @@ export type SttProviderInput = {
   apiKey?: string;
   model: string;
   tier: number;
+  cfAccessClientId?: string;
+  cfAccessClientSecret?: string;
 };
 
 export const SttProviderInputZod = z
@@ -33,5 +36,7 @@ export const SttProviderInputZod = z
     apiKey: z.string().default(""),
     model: z.string(),
     tier: z.number().int(),
+    cfAccessClientId: z.string().default(""),
+    cfAccessClientSecret: z.string().default(""),
   })
   .strict() satisfies z.ZodType<SttProviderInput>;
