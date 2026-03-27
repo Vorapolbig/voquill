@@ -216,11 +216,19 @@ if do_cleanup:
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
     # Qwen sometimes outputs the response twice due to a llama.cpp stop token bug.
-    # Detect by finding where the opening of the response reappears mid-text.
-    prefix = cleaned[:60].strip()
-    second = cleaned.find(prefix, 100)
-    if second > 100:
-        cleaned = cleaned[:second].strip()
+    # Deduplicate by removing any paragraph that has already appeared.
+    paragraphs = [p.strip() for p in cleaned.split('\n\n') if p.strip()]
+    seen, deduped = [], []
+    for p in paragraphs:
+        if p in seen:
+            if DEBUG:
+                print(f"[debug] dedup: stopped at duplicate paragraph #{len(deduped)+1}", file=sys.stderr)
+            break
+        seen.append(p)
+        deduped.append(p)
+    if DEBUG:
+        print(f"[debug] dedup: {len(paragraphs)} paragraphs → {len(deduped)} kept", file=sys.stderr)
+    cleaned = '\n\n'.join(deduped)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
