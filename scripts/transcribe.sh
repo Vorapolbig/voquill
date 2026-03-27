@@ -215,10 +215,12 @@ if do_cleanup:
     cleaned = d["choices"][0]["message"]["content"]
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
-    # Qwen sometimes outputs the response twice — detect and drop the duplicate half
-    mid = len(cleaned) // 2
-    if mid > 100 and cleaned[:mid].strip() == cleaned[mid:].strip():
-        cleaned = cleaned[:mid].strip()
+    # Qwen sometimes outputs the response twice due to a llama.cpp stop token bug.
+    # Detect by finding where the opening of the response reappears mid-text.
+    prefix = cleaned[:60].strip()
+    second = cleaned.find(prefix, 100)
+    if second > 100:
+        cleaned = cleaned[:second].strip()
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
