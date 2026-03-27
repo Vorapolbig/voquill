@@ -92,13 +92,13 @@ TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
 trap "rm -f $TMP_PCM" EXIT
 
 if $DEBUG; then
-  T0=$(date +%s%3N)
+  T0=$(python3 -c "import time; print(int(time.monotonic()*1000))")
 fi
 
 ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
 if $DEBUG; then
-  T1=$(date +%s%3N)
+  T1=$(python3 -c "import time; print(int(time.monotonic()*1000))")
   echo "[debug] ffmpeg convert:    $((T1 - T0))ms" >&2
 fi
 
