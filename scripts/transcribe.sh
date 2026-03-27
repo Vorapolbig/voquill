@@ -230,13 +230,16 @@ if do_cleanup:
             print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
-        print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
+        print(f"\n[debug] cleaned text:\n{cleaned}", file=sys.stderr)
+        print(f"\n{'─'*60}\n", file=sys.stderr)
 
     if json_output:
         print(json.dumps({"raw": raw_text, "cleaned": cleaned}, indent=2))
     else:
         print(cleaned)
 else:
+    if DEBUG:
+        print(f"\n{'─'*60}\n", file=sys.stderr)
     if json_output:
         print(json.dumps({"raw": raw_text}, indent=2))
     else:
