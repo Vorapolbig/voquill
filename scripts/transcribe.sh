@@ -12,6 +12,7 @@
 #   --llm-url       LLM cleanup server URL (default: https://llm.vorapol.cv)
 #   --no-cleanup    Skip LLM filler word cleanup
 #   -j, --json      Output full JSON response instead of just the text
+#   -d, --debug     Print per-step latency and raw vs cleaned text comparison
 #
 # Credentials (in priority order):
 #   1. CF_ID / CF_SECRET environment variables
@@ -34,6 +35,7 @@ WHISPER_URL="https://whisper.vorapol.cv"
 LLM_URL="https://llm.vorapol.cv"
 CLEANUP=true
 JSON_OUTPUT=false
+DEBUG=false
 SAMPLE_RATE=16000
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +47,7 @@ while [[ $# -gt 0 ]]; do
     --llm-url)       LLM_URL="$2";     shift 2 ;;
     --no-cleanup)    CLEANUP=false;    shift ;;
     -j|--json)       JSON_OUTPUT=true; shift ;;
+    -d|--debug)      DEBUG=true;       shift ;;
     -h|--help)       usage ;;
     -*)              echo "Unknown option: $1" >&2; usage ;;
     *)               AUDIO_FILE="$1";  shift ;;
@@ -79,11 +82,21 @@ export CF_ID CF_SECRET
 TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
 trap "rm -f $TMP_PCM" EXIT
 
+if $DEBUG; then
+  T0=$(date +%s%3N)
+fi
+
 ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
-python3 - <<PYEOF
-import json, os, sys, urllib.request
+if $DEBUG; then
+  T1=$(date +%s%3N)
+  echo "[debug] ffmpeg convert:    $((T1 - T0))ms" >&2
+fi
 
+python3 - <<PYEOF
+import json, os, sys, time, urllib.request
+
+DEBUG = "$DEBUG" == "true"
 CF_HEADERS = {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
@@ -102,13 +115,18 @@ session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
 if "$LANGUAGE": session_body["language"] = "$LANGUAGE"
 if "$PROMPT":   session_body["initialPrompt"] = "$PROMPT"
 
+t0 = time.monotonic()
 session = cf_request(
     "$WHISPER_URL/v1/transcriptions/sessions",
     data=json.dumps(session_body).encode(),
     extra_headers={"Content-Type": "application/json"},
 )
 session_id = session["sessionId"]
+if DEBUG:
+    print(f"[debug] whisper session:    {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 
+t0 = time.monotonic()
+chunk_count = 0
 with open("$TMP_PCM", "rb") as f:
     while True:
         chunk = f.read(CHUNK_BYTES)
@@ -119,13 +137,19 @@ with open("$TMP_PCM", "rb") as f:
             data=chunk,
             extra_headers={"Content-Type": "application/octet-stream"},
         )
+        chunk_count += 1
+if DEBUG:
+    print(f"[debug] whisper upload:     {(time.monotonic()-t0)*1000:.0f}ms  ({chunk_count} chunks)", file=sys.stderr)
 
+t0 = time.monotonic()
 result = cf_request(
     f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/finalize",
     data=b"",
     extra_headers={"Content-Type": "application/json"},
 )
 raw_text = result["text"]
+if DEBUG:
+    print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
@@ -144,6 +168,8 @@ if do_cleanup:
         print("[warn] LLM server not reachable, skipping cleanup", file=sys.stderr)
 
 if do_cleanup:
+    if DEBUG:
+        print(f"\n[debug] raw text:\n{raw_text}\n", file=sys.stderr)
     payload = json.dumps({
         "model": "qwen3.5",
         "chat_template_kwargs": {"enable_thinking": False},
@@ -158,6 +184,7 @@ if do_cleanup:
         "temperature": 0.1,
         "max_tokens": 1024,
     }).encode()
+    t0 = time.monotonic()
     req2 = urllib.request.Request(
         f"{llm_url}/v1/chat/completions",
         data=payload,
@@ -168,6 +195,9 @@ if do_cleanup:
     cleaned = d["choices"][0]["message"]["content"]
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
+    if DEBUG:
+        print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+        print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
 
     if json_output:
         print(json.dumps({"raw": raw_text, "cleaned": cleaned}, indent=2))
