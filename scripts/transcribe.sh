@@ -216,9 +216,18 @@ if do_cleanup:
     cleaned = choice["message"]["content"]
     if DEBUG:
         print(f"[debug] llm finish_reason: {choice.get('finish_reason')}", file=sys.stderr)
-        print(f"[debug] llm raw repr: {repr(cleaned)}", file=sys.stderr)
+        print(f"[debug] llm response length: {len(cleaned)} chars", file=sys.stderr)
+        print(f"[debug] llm response start: {repr(cleaned[:80])}", file=sys.stderr)
+        print(f"[debug] llm response end:   {repr(cleaned[-80:])}", file=sys.stderr)
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
+    # Dedup: find second occurrence of opening phrase (API sometimes returns response twice)
+    prefix = cleaned[:30].strip()
+    second = cleaned.find(prefix, 50)
+    if second > 50:
+        cleaned = cleaned[:second].strip()
+        if DEBUG:
+            print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
