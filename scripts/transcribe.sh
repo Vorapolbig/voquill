@@ -212,25 +212,13 @@ if do_cleanup:
     )
     with urllib.request.urlopen(req2) as resp:
         d = json.load(resp)
-    cleaned = d["choices"][0]["message"]["content"]
+    choice = d["choices"][0]
+    cleaned = choice["message"]["content"]
+    if DEBUG:
+        print(f"[debug] llm finish_reason: {choice.get('finish_reason')}", file=sys.stderr)
+        print(f"[debug] llm raw repr: {repr(cleaned)}", file=sys.stderr)
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
-    # Qwen sometimes outputs the response twice due to a llama.cpp stop token bug.
-    if DEBUG:
-        print(f"[debug] dedup: raw cleaned repr: {repr(cleaned[:120])}", file=sys.stderr)
-    # Find the first sentence/line, then look for where it reappears.
-    first_line_end = cleaned.find('\n')
-    first_line = cleaned[:first_line_end].strip() if first_line_end > 0 else cleaned[:80].strip()
-    if DEBUG:
-        print(f"[debug] dedup: first_line={repr(first_line[:60])}", file=sys.stderr)
-    if len(first_line) > 20:
-        second = cleaned.find(first_line, len(first_line) + 10)
-        if DEBUG:
-            print(f"[debug] dedup: second occurrence at pos {second} (len={len(cleaned)})", file=sys.stderr)
-        if second > 0:
-            cleaned = cleaned[:second].strip()
-            if DEBUG:
-                print(f"[debug] dedup: trimmed to {len(cleaned)} chars", file=sys.stderr)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
