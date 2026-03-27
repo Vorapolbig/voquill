@@ -216,19 +216,21 @@ if do_cleanup:
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
     # Qwen sometimes outputs the response twice due to a llama.cpp stop token bug.
-    # Deduplicate by removing any paragraph that has already appeared.
-    paragraphs = [p.strip() for p in cleaned.split('\n\n') if p.strip()]
-    seen, deduped = [], []
-    for p in paragraphs:
-        if p in seen:
-            if DEBUG:
-                print(f"[debug] dedup: stopped at duplicate paragraph #{len(deduped)+1}", file=sys.stderr)
-            break
-        seen.append(p)
-        deduped.append(p)
     if DEBUG:
-        print(f"[debug] dedup: {len(paragraphs)} paragraphs → {len(deduped)} kept", file=sys.stderr)
-    cleaned = '\n\n'.join(deduped)
+        print(f"[debug] dedup: raw cleaned repr: {repr(cleaned[:120])}", file=sys.stderr)
+    # Find the first sentence/line, then look for where it reappears.
+    first_line_end = cleaned.find('\n')
+    first_line = cleaned[:first_line_end].strip() if first_line_end > 0 else cleaned[:80].strip()
+    if DEBUG:
+        print(f"[debug] dedup: first_line={repr(first_line[:60])}", file=sys.stderr)
+    if len(first_line) > 20:
+        second = cleaned.find(first_line, len(first_line) + 10)
+        if DEBUG:
+            print(f"[debug] dedup: second occurrence at pos {second} (len={len(cleaned)})", file=sys.stderr)
+        if second > 0:
+            cleaned = cleaned[:second].strip()
+            if DEBUG:
+                print(f"[debug] dedup: trimmed to {len(cleaned)} chars", file=sys.stderr)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
