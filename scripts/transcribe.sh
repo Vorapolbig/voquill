@@ -185,15 +185,24 @@ if do_cleanup:
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
             {"role": "system", "content": (
-                "You are a transcription editor. Clean up the following spoken transcription:\n"
-                "- Remove filler words (um, uh, like, you know, kind of, sort of, basically, actually, literally, right)\n"
-                "- Fix punctuation and capitalisation\n"
-                "- If the speaker lists multiple items or questions, format them as a numbered or bulleted list\n"
-                "- If there are distinct topics or sections, add a short bold heading\n"
-                "- Preserve the speaker's original meaning and wording — do not paraphrase\n"
-                "Return only the cleaned text, no explanation."
+                "You are a transcript rewriting assistant. "
+                "You modify the style and tone of the transcript while keeping the subject matter the same. "
+                "Return only the rewritten transcript, no explanation."
             )},
-            {"role": "user", "content": raw_text},
+            {"role": "user", "content": (
+                "Rewrite the following transcript using these rules:\n"
+                "- WORD CHOICE: Preserve the speaker's word choice\n"
+                "- STRUCTURE: Refine the written transcript to read like naturally written text that flows well, without materially changing anything the speaker said or how they said it\n"
+                "- CLEAN UP: Remove filler words, false starts and speech disfluencies that carry no meaning. But always keep exclamations that are meaningful to the speaker's expression.\n"
+                "- SYMBOLS: Convert spoken symbol cues to actual symbols: \"hashtag [word]\" becomes \"#[word]\", \"at [name]\" becomes \"@[name]\"\n"
+                "- LISTS: Format bulleted lists when the user speaks items in a list format\n"
+                "- PARAGRAPHS: Split into paragraphs where appropriate based on natural breaks in the speaker's thoughts\n"
+                "- CODE: Put backticks around code terms like filenames, function names, and code snippets\n"
+                "- SELF CORRECTIONS: When the speaker corrects themselves, ONLY keep the corrected version\n"
+                "- EMOJIS: Convert spoken emoji descriptions into actual emoji characters\n"
+                "- CRITICAL: Do NOT use em-dashes\n\n"
+                "Transcript:\n"
+            ) + raw_text},
         ],
         "temperature": 0.1,
         "max_tokens": 1024,
