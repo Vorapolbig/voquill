@@ -200,7 +200,8 @@ if do_cleanup:
                 "- CODE: Put backticks around code terms like filenames, function names, and code snippets\n"
                 "- SELF CORRECTIONS: When the speaker corrects themselves, ONLY keep the corrected version\n"
                 "- EMOJIS: Convert spoken emoji descriptions into actual emoji characters\n"
-                "- CRITICAL: Do NOT use em-dashes\n\n"
+                "- CRITICAL: Do NOT use em-dashes\n"
+                "- CRITICAL: Output the rewritten transcript ONCE only. Do not repeat it.\n\n"
                 "Transcript:\n"
             ) + raw_text},
         ],
@@ -218,6 +219,10 @@ if do_cleanup:
     cleaned = d["choices"][0]["message"]["content"]
     if "</think>" in cleaned:
         cleaned = cleaned.split("</think>")[-1].strip()
+    # Qwen sometimes outputs the response twice — detect and drop the duplicate half
+    mid = len(cleaned) // 2
+    if mid > 100 and cleaned[:mid].strip() == cleaned[mid:].strip():
+        cleaned = cleaned[:mid].strip()
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] cleaned text:\n{cleaned}\n", file=sys.stderr)
