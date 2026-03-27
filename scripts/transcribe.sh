@@ -87,6 +87,7 @@ import json, os, sys, urllib.request
 CF_HEADERS = {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
+    "User-Agent": "curl/8.4.0",
 }
 CHUNK_BYTES = 16000 * 4  # 1 second of float32
 
