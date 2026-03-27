@@ -206,7 +206,8 @@ if do_cleanup:
             ) + raw_text},
         ],
         "temperature": 0.1,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
+        "stop": ["<|im_end|>", "<|endoftext|>"],
     }).encode()
     t0 = time.monotonic()
     req2 = urllib.request.Request(
