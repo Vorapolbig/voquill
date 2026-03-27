@@ -16,6 +16,9 @@
 #   --local         Connect directly to home server (192.168.86.27) bypassing Cloudflare
 #   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
 #   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
+#   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
+#                   (default: ~/.whisper-glossary.json if it exists)
+#                   Format: {"wrong phrase": "correct phrase", ...}
 #
 # Credentials (in priority order):
 #   1. CF_ID / CF_SECRET environment variables
@@ -42,6 +45,7 @@ DEBUG=false
 LOCAL=false
 CONTEXT=""
 TONE=""
+GLOSSARY=""
 SAMPLE_RATE=16000
 LOCAL_IP="192.168.86.27"
 
@@ -58,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --local)         LOCAL=true;       shift ;;
     -c|--context)    CONTEXT="$2";     shift 2 ;;
     -t|--tone)       TONE="$2";        shift 2 ;;
+    -g|--glossary)   GLOSSARY="$2";    shift 2 ;;
     -h|--help)       usage ;;
     -*)              echo "Unknown option: $1" >&2; usage ;;
     *)               AUDIO_FILE="$1";  shift ;;
@@ -87,7 +92,12 @@ if [ -z "$CF_ID" ] || [ -z "$CF_SECRET" ]; then
   exit 1
 fi
 
-export CF_ID CF_SECRET CONTEXT TONE
+# Resolve glossary file path
+if [ -z "$GLOSSARY" ] && [ -f "$HOME/.whisper-glossary.json" ]; then
+  GLOSSARY="$HOME/.whisper-glossary.json"
+fi
+
+export CF_ID CF_SECRET CONTEXT TONE GLOSSARY
 
 if $LOCAL; then
   WHISPER_URL="http://$LOCAL_IP:7772"
@@ -134,6 +144,19 @@ DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
 CONTEXT = os.environ.get("CONTEXT", "")
 TONE = os.environ.get("TONE", "")
+
+def load_glossary():
+    path = os.environ.get("GLOSSARY", "")
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
+
+def apply_glossary(text, glossary):
+    import re
+    for wrong, correct in glossary.items():
+        text = re.sub(re.escape(wrong), correct, text, flags=re.IGNORECASE)
+    return text
 CF_HEADERS = {} if LOCAL else {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
@@ -262,6 +285,12 @@ if do_cleanup:
         cleaned = cleaned[:second].strip()
         if DEBUG:
             print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
+    glossary = load_glossary()
+    if glossary:
+        cleaned = apply_glossary(cleaned, glossary)
+        if DEBUG:
+            print(f"[debug] glossary: applied {len(glossary)} entries from {os.environ.get('GLOSSARY')}", file=sys.stderr)
+
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
         print(f"\n[debug] word diff (\033[31mremoved\033[0m / \033[32madded\033[0m / \033[2munchanged\033[0m):", file=sys.stderr)
@@ -273,6 +302,9 @@ if do_cleanup:
     else:
         print(cleaned)
 else:
+    glossary = load_glossary()
+    if glossary:
+        raw_text = apply_glossary(raw_text, glossary)
     if DEBUG:
         print(f"\n{'─'*60}\n", file=sys.stderr)
     if json_output:
