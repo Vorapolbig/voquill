@@ -94,14 +94,8 @@ CHUNK_BYTES = 16000 * 4  # 1 second of float32
 def cf_request(url, data=None, extra_headers=None):
     headers = {**CF_HEADERS, **(extra_headers or {})}
     req = urllib.request.Request(url, data=data, headers=headers)
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.load(resp)
-    except urllib.error.HTTPError as e:
-        print(f"HTTP {e.code} {e.reason} — {url}", file=sys.stderr)
-        print(f"Response body: {e.read(512)}", file=sys.stderr)
-        print(f"CF_ID used: {CF_HEADERS['CF-Access-Client-Id'][:12]}...", file=sys.stderr)
-        raise
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
 
 # --- Whisper transcription via session API (binary chunks, no size limit) ---
 session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
