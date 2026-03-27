@@ -13,6 +13,7 @@
 #   --no-cleanup    Skip LLM filler word cleanup
 #   -j, --json      Output full JSON response instead of just the text
 #   -d, --debug     Print per-step latency and raw vs cleaned text comparison
+#   --local         Connect directly to home server (192.168.86.27) bypassing Cloudflare
 #
 # Credentials (in priority order):
 #   1. CF_ID / CF_SECRET environment variables
@@ -36,7 +37,9 @@ LLM_URL="https://llm.vorapol.cv"
 CLEANUP=true
 JSON_OUTPUT=false
 DEBUG=false
+LOCAL=false
 SAMPLE_RATE=16000
+LOCAL_IP="192.168.86.27"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --no-cleanup)    CLEANUP=false;    shift ;;
     -j|--json)       JSON_OUTPUT=true; shift ;;
     -d|--debug)      DEBUG=true;       shift ;;
+    --local)         LOCAL=true;       shift ;;
     -h|--help)       usage ;;
     -*)              echo "Unknown option: $1" >&2; usage ;;
     *)               AUDIO_FILE="$1";  shift ;;
@@ -79,6 +83,11 @@ fi
 
 export CF_ID CF_SECRET
 
+if $LOCAL; then
+  WHISPER_URL="http://$LOCAL_IP:7772"
+  LLM_URL="http://$LOCAL_IP:8766"
+fi
+
 TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
 trap "rm -f $TMP_PCM" EXIT
 
@@ -97,7 +106,8 @@ python3 - <<PYEOF
 import json, os, sys, time, urllib.request
 
 DEBUG = "$DEBUG" == "true"
-CF_HEADERS = {
+LOCAL = "$LOCAL" == "true"
+CF_HEADERS = {} if LOCAL else {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
     "User-Agent": "curl/8.4.0",
