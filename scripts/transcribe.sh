@@ -15,7 +15,7 @@
 #
 # Credentials (in priority order):
 #   1. CF_ID / CF_SECRET environment variables
-#   2. ~/.whisper.env file with CF_ID=... and CF_SECRET=...
+#   2. ~/.whisper.env or ~/.env.whisper file with CF_ID=... and CF_SECRET=...
 #
 # Prerequisites: ffmpeg (brew install ffmpeg), python3, curl
 
@@ -58,19 +58,23 @@ if [ ! -f "$AUDIO_FILE" ]; then
   exit 1
 fi
 
-ENV_FILE="$HOME/.whisper.env"
-if [ -f "$ENV_FILE" ]; then
-  # shellcheck source=/dev/null
-  source "$ENV_FILE"
-fi
+for ENV_FILE in "$HOME/.whisper.env" "$HOME/.env.whisper"; do
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    break
+  fi
+done
 
 CF_ID="${CF_ID:-}"
 CF_SECRET="${CF_SECRET:-}"
 
 if [ -z "$CF_ID" ] || [ -z "$CF_SECRET" ]; then
-  echo "Error: CF_ID and CF_SECRET must be set in $ENV_FILE or as environment variables." >&2
+  echo "Error: CF_ID and CF_SECRET must be set in ~/.whisper.env, ~/.env.whisper, or as environment variables." >&2
   exit 1
 fi
+
+export CF_ID CF_SECRET
 
 TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
 trap "rm -f $TMP_PCM" EXIT
@@ -78,11 +82,11 @@ trap "rm -f $TMP_PCM" EXIT
 ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
 python3 - <<PYEOF
-import json, sys, urllib.request
+import json, os, sys, urllib.request
 
 CF_HEADERS = {
-    "CF-Access-Client-Id": "$CF_ID",
-    "CF-Access-Client-Secret": "$CF_SECRET",
+    "CF-Access-Client-Id": os.environ["CF_ID"],
+    "CF-Access-Client-Secret": os.environ["CF_SECRET"],
 }
 CHUNK_BYTES = 16000 * 4  # 1 second of float32
 
