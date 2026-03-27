@@ -185,9 +185,13 @@ if do_cleanup:
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
             {"role": "system", "content": (
-                "Remove filler words (um, uh, like, you know, kind of, sort of, basically, "
-                "actually, literally, right) from the transcription. "
-                "Fix punctuation and capitalisation. Return only the cleaned text, no explanation."
+                "You are a transcription editor. Clean up the following spoken transcription:\n"
+                "- Remove filler words (um, uh, like, you know, kind of, sort of, basically, actually, literally, right)\n"
+                "- Fix punctuation and capitalisation\n"
+                "- If the speaker lists multiple items or questions, format them as a numbered or bulleted list\n"
+                "- If there are distinct topics or sections, add a short bold heading\n"
+                "- Preserve the speaker's original meaning and wording — do not paraphrase\n"
+                "Return only the cleaned text, no explanation."
             )},
             {"role": "user", "content": raw_text},
         ],
