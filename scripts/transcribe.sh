@@ -77,80 +77,79 @@ trap "rm -f $TMP_PCM" EXIT
 
 ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
-SAMPLES=$(python3 -c "
-import struct, json
-data = open('$TMP_PCM', 'rb').read()
-print(json.dumps(list(struct.unpack_from(f'{len(data)//4}f', data))))
-")
+python3 - <<PYEOF
+import json, struct, sys, urllib.request
 
-BODY=$(python3 -c "
-import json
-body = {'model': '$MODEL', 'samples': $SAMPLES, 'sampleRate': $SAMPLE_RATE}
-if '$LANGUAGE': body['language'] = '$LANGUAGE'
-if '$PROMPT':   body['initialPrompt'] = '$PROMPT'
-print(json.dumps(body))
-")
+# --- Whisper transcription ---
+with open("$TMP_PCM", "rb") as f:
+    data = f.read()
+samples = list(struct.unpack_from(f"{len(data)//4}f", data))
 
-RESPONSE=$(curl -sf -X POST "$WHISPER_URL/v1/transcriptions" \
-  -H "CF-Access-Client-Id: $CF_ID" \
-  -H "CF-Access-Client-Secret: $CF_SECRET" \
-  -H "Content-Type: application/json" \
-  -d "$BODY")
-
-RAW_TEXT=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['text'])")
-
-if $CLEANUP && curl -sf "$LLM_URL/health" > /dev/null 2>&1; then
-  CLEANED=$(python3 - "$RAW_TEXT" "$LLM_URL" <<'PYEOF'
-import sys, json
-import urllib.request
-
-raw_text = sys.argv[1]
-llm_url  = sys.argv[2]
-
-payload = json.dumps({
-  "model": "qwen3.5",
-  "chat_template_kwargs": {"enable_thinking": False},
-  "messages": [
-    {"role": "system", "content": (
-      "Remove filler words (um, uh, like, you know, kind of, sort of, basically, "
-      "actually, literally, right) from the transcription. "
-      "Fix punctuation and capitalisation. Return only the cleaned text, no explanation."
-    )},
-    {"role": "user", "content": raw_text}
-  ],
-  "temperature": 0.1,
-  "max_tokens": 1024
-}).encode()
+body = {"model": "$MODEL", "samples": samples, "sampleRate": $SAMPLE_RATE}
+if "$LANGUAGE": body["language"] = "$LANGUAGE"
+if "$PROMPT":   body["initialPrompt"] = "$PROMPT"
 
 req = urllib.request.Request(
-  f"{llm_url}/v1/chat/completions",
-  data=payload,
-  headers={"Content-Type": "application/json"}
+    "$WHISPER_URL/v1/transcriptions",
+    data=json.dumps(body).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "CF-Access-Client-Id": "$CF_ID",
+        "CF-Access-Client-Secret": "$CF_SECRET",
+    },
 )
 with urllib.request.urlopen(req) as resp:
-  d = json.load(resp)
+    raw_text = json.load(resp)["text"]
 
-content = d["choices"][0]["message"]["content"]
-if "</think>" in content:
-    content = content.split("</think>")[-1].strip()
-print(content)
+# --- LLM filler cleanup ---
+do_cleanup = "$CLEANUP" == "true"
+llm_url = "$LLM_URL"
+json_output = "$JSON_OUTPUT" == "true"
+
+if do_cleanup:
+    try:
+        req2 = urllib.request.Request(
+            f"{llm_url}/health",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req2, timeout=2)
+    except Exception:
+        do_cleanup = False
+        print("[warn] LLM server not reachable, skipping cleanup", file=sys.stderr)
+
+if do_cleanup:
+    payload = json.dumps({
+        "model": "qwen3.5",
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [
+            {"role": "system", "content": (
+                "Remove filler words (um, uh, like, you know, kind of, sort of, basically, "
+                "actually, literally, right) from the transcription. "
+                "Fix punctuation and capitalisation. Return only the cleaned text, no explanation."
+            )},
+            {"role": "user", "content": raw_text},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 1024,
+    }).encode()
+    req2 = urllib.request.Request(
+        f"{llm_url}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req2) as resp:
+        d = json.load(resp)
+    cleaned = d["choices"][0]["message"]["content"]
+    if "</think>" in cleaned:
+        cleaned = cleaned.split("</think>")[-1].strip()
+
+    if json_output:
+        print(json.dumps({"raw": raw_text, "cleaned": cleaned}, indent=2))
+    else:
+        print(cleaned)
+else:
+    if json_output:
+        print(json.dumps({"raw": raw_text}, indent=2))
+    else:
+        print(raw_text)
 PYEOF
-)
-
-  if $JSON_OUTPUT; then
-    python3 -c "
-import json, sys
-print(json.dumps({'raw': sys.argv[1], 'cleaned': sys.argv[2]}, indent=2))
-" "$RAW_TEXT" "$CLEANED"
-  else
-    echo "$CLEANED"
-  fi
-else
-  $CLEANUP && echo "[warn] LLM server not reachable at $LLM_URL, skipping cleanup" >&2
-
-  if $JSON_OUTPUT; then
-    echo "$RESPONSE" | python3 -m json.tool
-  else
-    echo "$RAW_TEXT"
-  fi
-fi
