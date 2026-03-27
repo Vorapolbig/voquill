@@ -78,28 +78,49 @@ trap "rm -f $TMP_PCM" EXIT
 ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
 python3 - <<PYEOF
-import json, struct, sys, urllib.request
+import json, sys, urllib.request
 
-# --- Whisper transcription ---
-with open("$TMP_PCM", "rb") as f:
-    data = f.read()
-samples = list(struct.unpack_from(f"{len(data)//4}f", data))
+CF_HEADERS = {
+    "CF-Access-Client-Id": "$CF_ID",
+    "CF-Access-Client-Secret": "$CF_SECRET",
+}
+CHUNK_BYTES = 16000 * 4  # 1 second of float32
 
-body = {"model": "$MODEL", "samples": samples, "sampleRate": $SAMPLE_RATE}
-if "$LANGUAGE": body["language"] = "$LANGUAGE"
-if "$PROMPT":   body["initialPrompt"] = "$PROMPT"
+def cf_request(url, data=None, extra_headers=None):
+    headers = {**CF_HEADERS, **(extra_headers or {})}
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
 
-req = urllib.request.Request(
-    "$WHISPER_URL/v1/transcriptions",
-    data=json.dumps(body).encode(),
-    headers={
-        "Content-Type": "application/json",
-        "CF-Access-Client-Id": "$CF_ID",
-        "CF-Access-Client-Secret": "$CF_SECRET",
-    },
+# --- Whisper transcription via session API (binary chunks, no size limit) ---
+session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
+if "$LANGUAGE": session_body["language"] = "$LANGUAGE"
+if "$PROMPT":   session_body["initialPrompt"] = "$PROMPT"
+
+session = cf_request(
+    "$WHISPER_URL/v1/transcriptions/sessions",
+    data=json.dumps(session_body).encode(),
+    extra_headers={"Content-Type": "application/json"},
 )
-with urllib.request.urlopen(req) as resp:
-    raw_text = json.load(resp)["text"]
+session_id = session["sessionId"]
+
+with open("$TMP_PCM", "rb") as f:
+    while True:
+        chunk = f.read(CHUNK_BYTES)
+        if not chunk:
+            break
+        cf_request(
+            f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/chunks",
+            data=chunk,
+            extra_headers={"Content-Type": "application/octet-stream"},
+        )
+
+result = cf_request(
+    f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/finalize",
+    data=b"",
+    extra_headers={"Content-Type": "application/json"},
+)
+raw_text = result["text"]
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
