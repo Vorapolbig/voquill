@@ -185,25 +185,20 @@ if do_cleanup:
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
             {"role": "system", "content": (
-                "You are a transcript rewriting assistant. "
-                "You modify the style and tone of the transcript while keeping the subject matter the same. "
-                "Return only the rewritten transcript, no explanation."
-            )},
-            {"role": "user", "content": (
-                "Rewrite the following transcript using these rules:\n"
+                "You are a transcript rewriting assistant. Rewrite the transcript the user provides using these rules:\n"
                 "- WORD CHOICE: Preserve the speaker's word choice\n"
-                "- STRUCTURE: Refine the written transcript to read like naturally written text that flows well, without materially changing anything the speaker said or how they said it\n"
-                "- CLEAN UP: Remove filler words, false starts and speech disfluencies that carry no meaning. But always keep exclamations that are meaningful to the speaker's expression.\n"
-                "- SYMBOLS: Convert spoken symbol cues to actual symbols: \"hashtag [word]\" becomes \"#[word]\", \"at [name]\" becomes \"@[name]\"\n"
-                "- LISTS: Format bulleted lists when the user speaks items in a list format\n"
-                "- PARAGRAPHS: Split into paragraphs where appropriate based on natural breaks in the speaker's thoughts\n"
-                "- CODE: Put backticks around code terms like filenames, function names, and code snippets\n"
-                "- SELF CORRECTIONS: When the speaker corrects themselves, ONLY keep the corrected version\n"
-                "- EMOJIS: Convert spoken emoji descriptions into actual emoji characters\n"
-                "- CRITICAL: Do NOT use em-dashes\n"
-                "- CRITICAL: Output the rewritten transcript ONCE only. Do not repeat it.\n\n"
-                "Transcript:\n"
-            ) + raw_text},
+                "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said\n"
+                "- CLEAN UP: Remove filler words, false starts and speech disfluencies. Keep meaningful exclamations.\n"
+                "- SYMBOLS: Convert spoken cues: \"hashtag X\" → \"#X\", \"at name\" → \"@name\"\n"
+                "- LISTS: Format bulleted lists when the speaker enumerates items\n"
+                "- PARAGRAPHS: Split into paragraphs at natural breaks in thought\n"
+                "- CODE: Wrap code terms, filenames, function names in backticks\n"
+                "- SELF CORRECTIONS: Keep only the corrected version, drop the earlier attempt\n"
+                "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters\n"
+                "- Do NOT use em-dashes\n"
+                "Return only the rewritten transcript, nothing else."
+            )},
+            {"role": "user", "content": raw_text},
         ],
         "temperature": 0.1,
         "max_tokens": 2048,
