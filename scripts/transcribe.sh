@@ -9,7 +9,7 @@
 #   -l, --language  Language code e.g. en, fi, fr (default: auto-detect)
 #   -p, --prompt    Initial prompt to guide transcription
 #   -u, --url       Whisper server URL (default: https://whisper.vorapol.cv)
-#   --llm-url       LLM cleanup server URL (default: http://localhost:8766)
+#   --llm-url       LLM cleanup server URL (default: https://llm.vorapol.cv)
 #   --no-cleanup    Skip LLM filler word cleanup
 #   -j, --json      Output full JSON response instead of just the text
 #
@@ -31,7 +31,7 @@ MODEL="base"
 LANGUAGE=""
 PROMPT=""
 WHISPER_URL="https://whisper.vorapol.cv"
-LLM_URL="http://localhost:8766"
+LLM_URL="https://llm.vorapol.cv"
 CLEANUP=true
 JSON_OUTPUT=false
 SAMPLE_RATE=16000
@@ -136,9 +136,9 @@ if do_cleanup:
     try:
         req2 = urllib.request.Request(
             f"{llm_url}/health",
-            headers={"Content-Type": "application/json"},
+            headers={**CF_HEADERS},
         )
-        urllib.request.urlopen(req2, timeout=2)
+        urllib.request.urlopen(req2, timeout=5)
     except Exception:
         do_cleanup = False
         print("[warn] LLM server not reachable, skipping cleanup", file=sys.stderr)
@@ -161,7 +161,7 @@ if do_cleanup:
     req2 = urllib.request.Request(
         f"{llm_url}/v1/chat/completions",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={**CF_HEADERS, "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req2) as resp:
         d = json.load(resp)
