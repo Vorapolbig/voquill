@@ -14,6 +14,8 @@
 #   -j, --json      Output full JSON response instead of just the text
 #   -d, --debug     Print per-step latency and raw vs cleaned text comparison
 #   --local         Connect directly to home server (192.168.86.27) bypassing Cloudflare
+#   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
+#   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
 #
 # Credentials (in priority order):
 #   1. CF_ID / CF_SECRET environment variables
@@ -38,6 +40,8 @@ CLEANUP=true
 JSON_OUTPUT=false
 DEBUG=false
 LOCAL=false
+CONTEXT=""
+TONE=""
 SAMPLE_RATE=16000
 LOCAL_IP="192.168.86.27"
 
@@ -52,6 +56,8 @@ while [[ $# -gt 0 ]]; do
     -j|--json)       JSON_OUTPUT=true; shift ;;
     -d|--debug)      DEBUG=true;       shift ;;
     --local)         LOCAL=true;       shift ;;
+    -c|--context)    CONTEXT="$2";     shift 2 ;;
+    -t|--tone)       TONE="$2";        shift 2 ;;
     -h|--help)       usage ;;
     -*)              echo "Unknown option: $1" >&2; usage ;;
     *)               AUDIO_FILE="$1";  shift ;;
@@ -81,7 +87,7 @@ if [ -z "$CF_ID" ] || [ -z "$CF_SECRET" ]; then
   exit 1
 fi
 
-export CF_ID CF_SECRET
+export CF_ID CF_SECRET CONTEXT TONE
 
 if $LOCAL; then
   WHISPER_URL="http://$LOCAL_IP:7772"
@@ -107,6 +113,8 @@ import json, os, sys, time, urllib.request
 
 DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
+CONTEXT = os.environ.get("CONTEXT", "")
+TONE = os.environ.get("TONE", "")
 CF_HEADERS = {} if LOCAL else {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
@@ -184,20 +192,27 @@ if do_cleanup:
         "model": "qwen3.5",
         "chat_template_kwargs": {"enable_thinking": False},
         "messages": [
-            {"role": "system", "content": (
-                "You are a transcript rewriting assistant. Rewrite the transcript the user provides using these rules:\n"
-                "- WORD CHOICE: Preserve the speaker's word choice\n"
-                "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said\n"
-                "- CLEAN UP: Remove filler words, false starts and speech disfluencies. Keep meaningful exclamations.\n"
-                "- SYMBOLS: Convert spoken cues: \"hashtag X\" → \"#X\", \"at name\" → \"@name\"\n"
-                "- LISTS: Format bulleted lists when the speaker enumerates items\n"
-                "- PARAGRAPHS: Split into paragraphs at natural breaks in thought\n"
-                "- CODE: Wrap code terms, filenames, function names in backticks\n"
-                "- SELF CORRECTIONS: Keep only the corrected version, drop the earlier attempt\n"
-                "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters\n"
-                "- Do NOT use em-dashes\n"
-                "Return only the rewritten transcript, nothing else."
-            )},
+            {"role": "system", "content": "\n".join(filter(None, [
+                "You are a highly skilled editor specialising in cleaning up raw speech-to-text transcripts.",
+                "Your goal is to produce the clean typed version of what the user intended to say, not a literal transcription.",
+                "",
+                "Rules:",
+                "- WORD CHOICE: Preserve the speaker's word choice and voice",
+                "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said",
+                "- DISFLUENCIES: Remove filler words (um, uh, like, you know, so yeah), false starts, and stutters. Keep meaningful exclamations.",
+                "- SELF CORRECTIONS: If the speaker corrects themselves, keep only the final intended version",
+                "- INSTRUCTIONS: If the speaker gives a formatting command (e.g. 'make that a bulleted list', 'put that in code'), execute it — do not transcribe it",
+                "- TECHNICAL: Preserve and correctly format technical terms, variable names (camelCase, snake_case, PascalCase), filenames, and code snippets in backticks",
+                "- SYMBOLS: Convert spoken cues: 'hashtag X' → '#X', 'at name' → '@name'",
+                "- LISTS: Format bulleted lists when the speaker enumerates items",
+                "- PARAGRAPHS: Split into paragraphs at natural breaks in thought",
+                "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters",
+                "- Do NOT use em-dashes",
+                f"- CONTEXT: The user is writing in {CONTEXT}. Format output appropriately for that context." if CONTEXT else "",
+                f"- TONE: Write in a {TONE} tone." if TONE else "",
+                "",
+                "Output ONLY the cleaned text. No intro, no outro, no explanation.",
+            ]))},
             {"role": "user", "content": raw_text},
         ],
         "temperature": 0.1,
