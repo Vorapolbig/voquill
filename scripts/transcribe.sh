@@ -154,9 +154,13 @@ def load_glossary():
 
 def apply_glossary(text, glossary):
     import re
+    hits = {}
     for wrong, correct in glossary.items():
-        text = re.sub(re.escape(wrong), correct, text, flags=re.IGNORECASE)
-    return text
+        new_text, count = re.subn(re.escape(wrong), correct, text, flags=re.IGNORECASE)
+        if count:
+            hits[wrong] = (correct, count)
+        text = new_text
+    return text, hits
 CF_HEADERS = {} if LOCAL else {
     "CF-Access-Client-Id": os.environ["CF_ID"],
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
@@ -287,9 +291,14 @@ if do_cleanup:
             print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
     glossary = load_glossary()
     if glossary:
-        cleaned = apply_glossary(cleaned, glossary)
+        cleaned, hits = apply_glossary(cleaned, glossary)
         if DEBUG:
-            print(f"[debug] glossary: applied {len(glossary)} entries from {os.environ.get('GLOSSARY')}", file=sys.stderr)
+            if hits:
+                print(f"[debug] glossary: {len(hits)}/{len(glossary)} entries matched:", file=sys.stderr)
+                for wrong, (correct, count) in hits.items():
+                    print(f"[debug]   '{wrong}' → '{correct}' ({count}×)", file=sys.stderr)
+            else:
+                print(f"[debug] glossary: 0/{len(glossary)} entries matched", file=sys.stderr)
 
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
@@ -304,7 +313,7 @@ if do_cleanup:
 else:
     glossary = load_glossary()
     if glossary:
-        raw_text = apply_glossary(raw_text, glossary)
+        raw_text, _ = apply_glossary(raw_text, glossary)
     if DEBUG:
         print(f"\n{'─'*60}\n", file=sys.stderr)
     if json_output:
