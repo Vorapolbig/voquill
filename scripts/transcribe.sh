@@ -109,7 +109,26 @@ if $DEBUG; then
 fi
 
 python3 - <<PYEOF
-import json, os, sys, time, urllib.request
+import difflib, json, os, sys, time, urllib.request
+
+def word_diff(a, b):
+    """Print a word-level diff of a→b with ANSI colours, git-diff style."""
+    RED, GREEN, DIM, RESET = "\033[31m", "\033[32m", "\033[2m", "\033[0m"
+    a_words = a.split()
+    b_words = b.split()
+    matcher = difflib.SequenceMatcher(None, a_words, b_words, autojunk=False)
+    out = []
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op == "equal":
+            out.append(DIM + " ".join(a_words[i1:i2]) + RESET)
+        elif op == "replace":
+            out.append(RED + " ".join(a_words[i1:i2]) + RESET)
+            out.append(GREEN + " ".join(b_words[j1:j2]) + RESET)
+        elif op == "delete":
+            out.append(RED + " ".join(a_words[i1:i2]) + RESET)
+        elif op == "insert":
+            out.append(GREEN + " ".join(b_words[j1:j2]) + RESET)
+    print(" ".join(out), file=sys.stderr)
 
 DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
@@ -245,7 +264,8 @@ if do_cleanup:
             print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
     if DEBUG:
         print(f"[debug] llm cleanup:        {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
-        print(f"\n[debug] cleaned text:\n{cleaned}", file=sys.stderr)
+        print(f"\n[debug] word diff (\033[31mremoved\033[0m / \033[32madded\033[0m / \033[2munchanged\033[0m):", file=sys.stderr)
+        word_diff(raw_text, cleaned)
         print(f"\n{'─'*60}\n", file=sys.stderr)
 
     if json_output:
