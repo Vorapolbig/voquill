@@ -100,8 +100,13 @@ fi
 export CF_ID CF_SECRET CONTEXT TONE GLOSSARY
 
 if $LOCAL; then
-  WHISPER_URL="http://$LOCAL_IP:7772"
-  LLM_URL="http://$LOCAL_IP:8766"
+  if python3 -c "import socket; s=socket.create_connection(('$LOCAL_IP', 7772), timeout=1); s.close()" 2>/dev/null; then
+    WHISPER_URL="http://$LOCAL_IP:7772"
+    LLM_URL="http://$LOCAL_IP:8766"
+    $DEBUG && echo "[debug] local: connected to $LOCAL_IP, using LAN" >&2
+  else
+    $DEBUG && echo "[debug] local: $LOCAL_IP unreachable, falling back to Cloudflare" >&2
+  fi
 fi
 
 TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
