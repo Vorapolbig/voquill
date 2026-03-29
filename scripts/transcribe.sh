@@ -317,12 +317,27 @@ elif DIARIZE:
     if CONTEXT:         fields["context"] = CONTEXT
     if TONE:            fields["tone"] = TONE
     if DEBUG:
-        print(f"[debug] sending to diarize pipeline{' + LLM' if diarize_llm_url else ''}...", file=sys.stderr)
+        print(f"[debug] sending to diarize pipeline{' + LLM' if diarize_llm_url else ''}...", file=sys.stderr, flush=True)
+
+    # Ticker: print elapsed time every 10s so the user knows it's alive
+    _stop_ticker = threading.Event()
+    def _ticker():
+        n = 0
+        while not _stop_ticker.wait(10):
+            n += 10
+            print(f"[debug] ... still running ({n}s elapsed)", file=sys.stderr, flush=True)
+    import threading as threading_mod
+    ticker = threading_mod.Thread(target=_ticker, daemon=True)
+    ticker.start()
+
     result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
+    _stop_ticker.set()
+
     raw_text = result["text"]
     llm_applied = result.get("llm_applied", False)
+    segments = result.get("segments", "?")
     if DEBUG:
-        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms  (llm={'yes' if llm_applied else 'no'})", file=sys.stderr)
+        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms  segments={segments}  llm={'yes' if llm_applied else 'no'}", file=sys.stderr)
 
 else:
     llm_applied = False

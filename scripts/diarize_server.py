@@ -263,7 +263,7 @@ async def diarize(
         else:
             transcript = "\n".join(line for _, _, line in sorted(raw_results, key=lambda x: x[0]))
 
-        return JSONResponse({"text": transcript, "llm_applied": use_llm})
+        return JSONResponse({"text": transcript, "llm_applied": use_llm, "segments": len(turns)})
 
 
 if __name__ == "__main__":
