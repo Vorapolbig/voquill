@@ -328,13 +328,81 @@ do_cleanup = "$CLEANUP" == "true"
 llm_url = "$LLM_URL"
 json_output = "$JSON_OUTPUT" == "true"
 
+# Split text at natural boundaries into word-limited chunks so each fits
+# within the LLM context window (input + output both need to fit in 8192 tokens).
+LLM_CHUNK_WORDS = 600  # ~800 tokens input, leaves ~1200 tokens for output within 8192 ctx
+
+def split_chunks(text, max_words=LLM_CHUNK_WORDS):
+    lines = text.split("\n")
+    chunks, current, count = [], [], 0
+    for line in lines:
+        n = len(line.split())
+        if count + n > max_words and current:
+            chunks.append("\n".join(current))
+            current, count = [line], n
+        else:
+            current.append(line)
+            count += n
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+SYSTEM_PROMPT = "\n".join(filter(None, [
+    "You are a highly skilled editor specialising in cleaning up raw speech-to-text transcripts.",
+    "Your goal is to produce the clean typed version of what the user intended to say, not a literal transcription.",
+    "",
+    "Rules:",
+    "- WORD CHOICE: Preserve the speaker's word choice and voice",
+    "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said",
+    "- DISFLUENCIES: Remove filler words (um, uh, like, you know, so yeah), false starts, and stutters. Keep meaningful exclamations.",
+    "- SELF CORRECTIONS: If the speaker corrects themselves, keep only the final intended version",
+    "- INSTRUCTIONS: If the speaker gives a formatting command (e.g. 'make that a bulleted list', 'put that in code'), execute it — do not transcribe it",
+    "- TECHNICAL: Preserve and correctly format technical terms, variable names (camelCase, snake_case, PascalCase), filenames, and code snippets in backticks",
+    "- SYMBOLS: Convert spoken cues: 'hashtag X' → '#X', 'at name' → '@name'",
+    "- LISTS: Format bulleted lists when the speaker enumerates items",
+    "- PARAGRAPHS: Split into paragraphs at natural breaks in thought",
+    "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters",
+    "- Do NOT use em-dashes",
+    f"- CONTEXT: The user is writing in {CONTEXT}. Format output appropriately for that context." if CONTEXT else "",
+    f"- TONE: Write in a {TONE} tone." if TONE else "",
+    "",
+    "Output ONLY the cleaned text. No intro, no outro, no explanation.",
+]))
+
+def llm_call(text):
+    payload = json.dumps({
+        "model": "qwen3.5",
+        "chat_template_kwargs": {"enable_thinking": False},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "stop": ["<|im_end|>", "<|endoftext|>"],
+    }).encode()
+    req = urllib.request.Request(
+        f"{llm_url}/v1/chat/completions",
+        data=payload,
+        headers={**CF_HEADERS, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req) as resp:
+        d = json.load(resp)
+    choice = d["choices"][0]
+    result = choice["message"]["content"]
+    if "</think>" in result:
+        result = result.split("</think>")[-1].strip()
+    # Dedup: trim if response is accidentally doubled
+    prefix = result[:30].strip()
+    second = result.find(prefix, 50)
+    if second > 50:
+        result = result[:second].strip()
+    return result, choice.get("finish_reason")
+
 if do_cleanup:
     try:
-        req2 = urllib.request.Request(
-            f"{llm_url}/health",
-            headers={**CF_HEADERS},
-        )
-        urllib.request.urlopen(req2, timeout=5)
+        urllib.request.urlopen(
+            urllib.request.Request(f"{llm_url}/health", headers={**CF_HEADERS}), timeout=5)
     except Exception:
         do_cleanup = False
         print("[warn] LLM server not reachable, skipping cleanup", file=sys.stderr)
@@ -342,61 +410,19 @@ if do_cleanup:
 if do_cleanup:
     if DEBUG:
         print(f"\n[debug] raw text:\n{raw_text}\n", file=sys.stderr)
-    payload = json.dumps({
-        "model": "qwen3.5",
-        "chat_template_kwargs": {"enable_thinking": False},
-        "messages": [
-            {"role": "system", "content": "\n".join(filter(None, [
-                "You are a highly skilled editor specialising in cleaning up raw speech-to-text transcripts.",
-                "Your goal is to produce the clean typed version of what the user intended to say, not a literal transcription.",
-                "",
-                "Rules:",
-                "- WORD CHOICE: Preserve the speaker's word choice and voice",
-                "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said",
-                "- DISFLUENCIES: Remove filler words (um, uh, like, you know, so yeah), false starts, and stutters. Keep meaningful exclamations.",
-                "- SELF CORRECTIONS: If the speaker corrects themselves, keep only the final intended version",
-                "- INSTRUCTIONS: If the speaker gives a formatting command (e.g. 'make that a bulleted list', 'put that in code'), execute it — do not transcribe it",
-                "- TECHNICAL: Preserve and correctly format technical terms, variable names (camelCase, snake_case, PascalCase), filenames, and code snippets in backticks",
-                "- SYMBOLS: Convert spoken cues: 'hashtag X' → '#X', 'at name' → '@name'",
-                "- LISTS: Format bulleted lists when the speaker enumerates items",
-                "- PARAGRAPHS: Split into paragraphs at natural breaks in thought",
-                "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters",
-                "- Do NOT use em-dashes",
-                f"- CONTEXT: The user is writing in {CONTEXT}. Format output appropriately for that context." if CONTEXT else "",
-                f"- TONE: Write in a {TONE} tone." if TONE else "",
-                "",
-                "Output ONLY the cleaned text. No intro, no outro, no explanation.",
-            ]))},
-            {"role": "user", "content": raw_text},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 2048,
-        "stop": ["<|im_end|>", "<|endoftext|>"],
-    }).encode()
-    t0 = time.monotonic()
-    req2 = urllib.request.Request(
-        f"{llm_url}/v1/chat/completions",
-        data=payload,
-        headers={**CF_HEADERS, "Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req2) as resp:
-        d = json.load(resp)
-    choice = d["choices"][0]
-    cleaned = choice["message"]["content"]
+    chunks = split_chunks(raw_text)
     if DEBUG:
-        print(f"[debug] llm finish_reason: {choice.get('finish_reason')}", file=sys.stderr)
-        print(f"[debug] llm response length: {len(cleaned)} chars", file=sys.stderr)
-        print(f"[debug] llm response start: {repr(cleaned[:80])}", file=sys.stderr)
-        print(f"[debug] llm response end:   {repr(cleaned[-80:])}", file=sys.stderr)
-    if "</think>" in cleaned:
-        cleaned = cleaned.split("</think>")[-1].strip()
-    # Dedup: find second occurrence of opening phrase (API sometimes returns response twice)
-    prefix = cleaned[:30].strip()
-    second = cleaned.find(prefix, 50)
-    if second > 50:
-        cleaned = cleaned[:second].strip()
+        print(f"[debug] llm chunks:         {len(chunks)} (total words: {len(raw_text.split())})", file=sys.stderr)
+    t0 = time.monotonic()
+    cleaned_parts = []
+    for i, chunk in enumerate(chunks):
+        part, finish_reason = llm_call(chunk)
+        cleaned_parts.append(part)
         if DEBUG:
-            print(f"[debug] dedup: trimmed at pos {second}, kept {len(cleaned)} chars", file=sys.stderr)
+            print(f"[debug] llm chunk {i+1}/{len(chunks)}: {len(chunk.split())} words in → "
+                  f"{len(part.split())} words out, finish={finish_reason}", file=sys.stderr)
+    cleaned = "\n\n".join(cleaned_parts) if len(cleaned_parts) > 1 else cleaned_parts[0]
+
     glossary = load_glossary()
     if glossary:
         cleaned, hits = apply_glossary(cleaned, glossary)
