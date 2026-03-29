@@ -16,6 +16,7 @@
 #   --local         Connect directly to home server (192.168.86.27) bypassing Cloudflare
 #   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
 #   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
+#   -s, --single    Send audio as one request instead of chunks (simpler, no streaming)
 #   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
 #                   (default: ~/.whisper-glossary.json if it exists)
 #                   Format: {"wrong phrase": "correct phrase", ...}
@@ -43,6 +44,7 @@ CLEANUP=true
 JSON_OUTPUT=false
 DEBUG=false
 LOCAL=false
+SINGLE=false
 CONTEXT=""
 TONE=""
 GLOSSARY=""
@@ -59,6 +61,7 @@ while [[ $# -gt 0 ]]; do
     --no-cleanup)    CLEANUP=false;    shift ;;
     -j|--json)       JSON_OUTPUT=true; shift ;;
     -d|--debug)      DEBUG=true;       shift ;;
+    -s|--single)     SINGLE=true;      shift ;;
     --local)         LOCAL=true;       shift ;;
     -c|--context)    CONTEXT="$2";     shift 2 ;;
     -t|--tone)       TONE="$2";        shift 2 ;;
@@ -97,7 +100,7 @@ if [ -z "$GLOSSARY" ] && [ -f "$HOME/.whisper-glossary.json" ]; then
   GLOSSARY="$HOME/.whisper-glossary.json"
 fi
 
-export CF_ID CF_SECRET CONTEXT TONE GLOSSARY
+export CF_ID CF_SECRET CONTEXT TONE GLOSSARY SINGLE
 
 if $LOCAL; then
   if python3 -c "import socket; s=socket.create_connection(('$LOCAL_IP', 7772), timeout=1); s.close()" 2>/dev/null; then
@@ -124,7 +127,7 @@ if $DEBUG; then
 fi
 
 python3 - <<PYEOF
-import difflib, json, os, sys, time, urllib.request
+import difflib, json, os, struct, sys, time, urllib.request
 
 def word_diff(a, b):
     """Print a word-level diff of a→b with ANSI colours, git-diff style."""
@@ -147,6 +150,7 @@ def word_diff(a, b):
 
 DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
+SINGLE = "$SINGLE" == "true"
 CONTEXT = os.environ.get("CONTEXT", "")
 TONE = os.environ.get("TONE", "")
 
@@ -179,46 +183,62 @@ def cf_request(url, data=None, extra_headers=None):
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)
 
-# --- Whisper transcription via session API (binary chunks, no size limit) ---
-session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
-if "$LANGUAGE": session_body["language"] = "$LANGUAGE"
-if "$PROMPT":   session_body["initialPrompt"] = "$PROMPT"
+# --- Whisper transcription ---
+if SINGLE:
+    t0 = time.monotonic()
+    with open("$TMP_PCM", "rb") as f:
+        raw_samples = list(struct.unpack(f'{os.path.getsize("$TMP_PCM")//4}f', f.read()))
+    body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE, "samples": raw_samples}
+    if "$LANGUAGE": body["language"] = "$LANGUAGE"
+    if "$PROMPT":   body["initialPrompt"] = "$PROMPT"
+    result = cf_request(
+        "$WHISPER_URL/v1/transcriptions",
+        data=json.dumps(body).encode(),
+        extra_headers={"Content-Type": "application/json"},
+    )
+    raw_text = result["text"]
+    if DEBUG:
+        print(f"[debug] whisper single:     {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+else:
+    session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
+    if "$LANGUAGE": session_body["language"] = "$LANGUAGE"
+    if "$PROMPT":   session_body["initialPrompt"] = "$PROMPT"
 
-t0 = time.monotonic()
-session = cf_request(
-    "$WHISPER_URL/v1/transcriptions/sessions",
-    data=json.dumps(session_body).encode(),
-    extra_headers={"Content-Type": "application/json"},
-)
-session_id = session["sessionId"]
-if DEBUG:
-    print(f"[debug] whisper session:    {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    t0 = time.monotonic()
+    session = cf_request(
+        "$WHISPER_URL/v1/transcriptions/sessions",
+        data=json.dumps(session_body).encode(),
+        extra_headers={"Content-Type": "application/json"},
+    )
+    session_id = session["sessionId"]
+    if DEBUG:
+        print(f"[debug] whisper session:    {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 
-t0 = time.monotonic()
-chunk_count = 0
-with open("$TMP_PCM", "rb") as f:
-    while True:
-        chunk = f.read(CHUNK_BYTES)
-        if not chunk:
-            break
-        cf_request(
-            f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/chunks",
-            data=chunk,
-            extra_headers={"Content-Type": "application/octet-stream"},
-        )
-        chunk_count += 1
-if DEBUG:
-    print(f"[debug] whisper upload:     {(time.monotonic()-t0)*1000:.0f}ms  ({chunk_count} chunks)", file=sys.stderr)
+    t0 = time.monotonic()
+    chunk_count = 0
+    with open("$TMP_PCM", "rb") as f:
+        while True:
+            chunk = f.read(CHUNK_BYTES)
+            if not chunk:
+                break
+            cf_request(
+                f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/chunks",
+                data=chunk,
+                extra_headers={"Content-Type": "application/octet-stream"},
+            )
+            chunk_count += 1
+    if DEBUG:
+        print(f"[debug] whisper upload:     {(time.monotonic()-t0)*1000:.0f}ms  ({chunk_count} chunks)", file=sys.stderr)
 
-t0 = time.monotonic()
-result = cf_request(
-    f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/finalize",
-    data=b"",
-    extra_headers={"Content-Type": "application/json"},
-)
-raw_text = result["text"]
-if DEBUG:
-    print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    t0 = time.monotonic()
+    result = cf_request(
+        f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/finalize",
+        data=b"",
+        extra_headers={"Content-Type": "application/json"},
+    )
+    raw_text = result["text"]
+    if DEBUG:
+        print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
