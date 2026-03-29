@@ -157,7 +157,7 @@ if ! $DIARIZE && [ -z "$FROM_RAW" ]; then
 fi
 
 python3 - <<PYEOF
-import difflib, json, os, struct, sys, time, urllib.request
+import difflib, json, os, struct, sys, threading, time, urllib.request
 
 def word_diff(a, b):
     """Print a word-level diff of a→b with ANSI colours, git-diff style."""
@@ -326,8 +326,7 @@ elif DIARIZE:
         while not _stop_ticker.wait(10):
             n += 10
             print(f"[debug] ... still running ({n}s elapsed)", file=sys.stderr, flush=True)
-    import threading as threading_mod
-    ticker = threading_mod.Thread(target=_ticker, daemon=True)
+    ticker = threading.Thread(target=_ticker, daemon=True)
     ticker.start()
 
     result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
