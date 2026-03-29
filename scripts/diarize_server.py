@@ -59,8 +59,13 @@ async def lifespan(app: FastAPI):
         "pyannote/speaker-diarization-3.1",
         token=HF_TOKEN or None,
     )
-    _pipeline.to(_device)
-    print("Pipeline ready.", file=sys.stderr, flush=True)
+    try:
+        _pipeline.to(_device)
+    except Exception as e:
+        print(f"Warning: {_device} unavailable ({e}), falling back to CPU", file=sys.stderr, flush=True)
+        _device = torch.device("cpu")
+        _pipeline.to(_device)
+    print(f"Pipeline ready on {_device}.", file=sys.stderr, flush=True)
     yield
 
 
