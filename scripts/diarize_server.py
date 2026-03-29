@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     print(f"Loading pyannote/speaker-diarization-3.1 on {_device} ...", file=sys.stderr, flush=True)
     _pipeline = DiarizePipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        token=HF_TOKEN or None,
+        use_auth_token=HF_TOKEN or None,
     )
     try:
         _pipeline.to(_device)
