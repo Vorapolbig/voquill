@@ -5,7 +5,7 @@
 # Usage: ./transcribe.sh <audio-file> [options]
 #
 # Options:
-#   -m, --model     Whisper model to use: tiny, base, small, medium, large (default: base)
+#   -m, --model     Whisper model to use: tiny, base, small, medium, large, turbo (default: turbo)
 #   -l, --language  Language code e.g. en, fi, fr (default: auto-detect)
 #   -p, --prompt    Initial prompt to guide transcription
 #   -u, --url       Whisper server URL (default: https://whisper.vorapol.cv)
@@ -34,7 +34,7 @@ usage() {
 }
 
 AUDIO_FILE=""
-MODEL="base"
+MODEL="turbo"
 LANGUAGE=""
 PROMPT=""
 WHISPER_URL="https://whisper.vorapol.cv"
