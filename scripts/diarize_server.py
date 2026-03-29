@@ -46,7 +46,14 @@ _device: torch.device | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _pipeline, _device
-    _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        if torch.cuda.is_available():
+            torch.zeros(1).cuda()  # probe — raises if SM version is unsupported
+            _device = torch.device("cuda")
+        else:
+            _device = torch.device("cpu")
+    except Exception:
+        _device = torch.device("cpu")
     print(f"Loading pyannote/speaker-diarization-3.1 on {_device} ...", file=sys.stderr, flush=True)
     _pipeline = DiarizePipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
