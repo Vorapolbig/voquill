@@ -171,7 +171,7 @@ CF_HEADERS = {} if LOCAL else {
     "CF-Access-Client-Secret": os.environ["CF_SECRET"],
     "User-Agent": "curl/8.4.0",
 }
-CHUNK_BYTES = 16000 * 4  # 1 second of float32
+CHUNK_BYTES = 16000 * 4 * 4  # 4 seconds of float32
 
 def cf_request(url, data=None, extra_headers=None):
     headers = {**CF_HEADERS, **(extra_headers or {})}
