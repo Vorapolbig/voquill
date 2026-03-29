@@ -120,6 +120,7 @@ if $LOCAL; then
   fi
 fi
 
+TMP_PCM=""
 if ! $DIARIZE; then
   TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
   trap "rm -f $TMP_PCM" EXIT
