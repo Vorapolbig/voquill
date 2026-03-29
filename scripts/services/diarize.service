@@ -8,7 +8,7 @@ Environment=DIARIZE_HOST=0.0.0.0
 Environment=DIARIZE_PORT=7773
 Environment=WHISPER_URL=http://localhost:7772
 EnvironmentFile=/home/vorapol/.whisper-secrets
-ExecStart=/usr/bin/python3 /home/vorapol/Projects/voquill/scripts/diarize_server.py
+ExecStart=/home/vorapol/.diarize_pyenv/bin/python3 /home/vorapol/Projects/voquill/scripts/diarize_server.py
 Restart=on-failure
 RestartSec=5
 
