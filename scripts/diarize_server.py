@@ -114,19 +114,25 @@ async def diarize(
         with open(audio_path, "wb") as f:
             f.write(await file.read())
 
-        # Convert to 16 kHz mono float32 PCM for Whisper segment slicing
-        pcm_path = os.path.join(tmpdir, "audio.pcm")
+        # Convert to 16 kHz mono WAV — used by both pyannote and Whisper segment slicing
+        wav_path = os.path.join(tmpdir, "audio.wav")
         subprocess.run(
             ["ffmpeg", "-y", "-i", audio_path,
-             "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "f32le", pcm_path],
+             "-ar", str(SAMPLE_RATE), "-ac", "1", wav_path],
+            check=True, capture_output=True,
+        )
+        # Read as raw float32 PCM for Whisper
+        pcm_path = os.path.join(tmpdir, "audio.pcm")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", wav_path, "-f", "f32le", pcm_path],
             check=True, capture_output=True,
         )
         with open(pcm_path, "rb") as f:
             raw = f.read()
         all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
 
-        # Diarize
-        diarization = _pipeline(audio_path)
+        # Diarize using the WAV (soundfile-compatible)
+        diarization = _pipeline(wav_path)
         turns = [(seg.start, seg.end, spk)
                  for seg, _, spk in diarization.itertracks(yield_label=True)]
         turns = _merge_segments(turns)
