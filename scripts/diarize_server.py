@@ -16,7 +16,6 @@ Environment variables:
   WHISPER_URL         upstream Whisper server (default: http://localhost:7772)
   HF_TOKEN            HuggingFace token for pyannote model access
 """
-import concurrent.futures
 import json
 import os
 import struct
@@ -151,8 +150,7 @@ async def diarize(
             text = _whisper_segment(samples, model, language, initial_prompt)
             return (start, spk, text) if text else None
 
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            results = list(pool.map(transcribe_segment, turns))
+        results = [transcribe_segment(seg) for seg in turns]
 
         results = sorted((r for r in results if r), key=lambda x: x[0])
         transcript = "\n".join(f"[{speaker_label(spk)}] {text}" for _, spk, text in results)
