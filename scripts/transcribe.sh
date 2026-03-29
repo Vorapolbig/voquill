@@ -17,6 +17,8 @@
 #   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
 #   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
 #   -s, --single    Send audio as one request instead of chunks (simpler, no streaming)
+#   --diarize       Detect multiple speakers (requires: pip install pyannote.audio torch)
+#                   Set HF_TOKEN in ~/.whisper.env (HuggingFace token for pyannote models)
 #   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
 #                   (default: ~/.whisper-glossary.json if it exists)
 #                   Format: {"wrong phrase": "correct phrase", ...}
@@ -45,6 +47,7 @@ JSON_OUTPUT=false
 DEBUG=false
 LOCAL=false
 SINGLE=false
+DIARIZE=false
 CONTEXT=""
 TONE=""
 GLOSSARY=""
@@ -62,6 +65,7 @@ while [[ $# -gt 0 ]]; do
     -j|--json)       JSON_OUTPUT=true; shift ;;
     -d|--debug)      DEBUG=true;       shift ;;
     -s|--single)     SINGLE=true;      shift ;;
+    --diarize)       DIARIZE=true;     shift ;;
     --local)         LOCAL=true;       shift ;;
     -c|--context)    CONTEXT="$2";     shift 2 ;;
     -t|--tone)       TONE="$2";        shift 2 ;;
@@ -100,7 +104,8 @@ if [ -z "$GLOSSARY" ] && [ -f "$HOME/.whisper-glossary.json" ]; then
   GLOSSARY="$HOME/.whisper-glossary.json"
 fi
 
-export CF_ID CF_SECRET CONTEXT TONE GLOSSARY SINGLE
+HF_TOKEN="${HF_TOKEN:-}"
+export CF_ID CF_SECRET CONTEXT TONE GLOSSARY SINGLE DIARIZE HF_TOKEN
 
 if $LOCAL; then
   if python3 -c "import socket; s=socket.create_connection(('$LOCAL_IP', 7772), timeout=1); s.close()" 2>/dev/null; then
@@ -151,6 +156,15 @@ def word_diff(a, b):
 DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
 SINGLE = "$SINGLE" == "true"
+DIARIZE = "$DIARIZE" == "true"
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+WHISPER_URL = "$WHISPER_URL"
+MODEL = "$MODEL"
+SAMPLE_RATE = $SAMPLE_RATE
+LANGUAGE = "$LANGUAGE"
+PROMPT = "$PROMPT"
+TMP_PCM = "$TMP_PCM"
+AUDIO_FILE = "$AUDIO_FILE"
 CONTEXT = os.environ.get("CONTEXT", "")
 TONE = os.environ.get("TONE", "")
 
@@ -183,62 +197,109 @@ def cf_request(url, data=None, extra_headers=None):
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)
 
-# --- Whisper transcription ---
-if SINGLE:
+# --- Helpers ---
+def whisper_single(samples):
+    body = {"model": MODEL, "sampleRate": SAMPLE_RATE, "samples": samples}
+    if LANGUAGE: body["language"] = LANGUAGE
+    if PROMPT:   body["initialPrompt"] = PROMPT
+    return cf_request(f"{WHISPER_URL}/v1/transcriptions", data=json.dumps(body).encode(),
+                      extra_headers={"Content-Type": "application/json"})["text"].strip()
+
+def whisper_chunked(samples):
+    import concurrent.futures as cf
+    session_body = {"model": MODEL, "sampleRate": SAMPLE_RATE}
+    if LANGUAGE: session_body["language"] = LANGUAGE
+    if PROMPT:   session_body["initialPrompt"] = PROMPT
     t0 = time.monotonic()
-    with open("$TMP_PCM", "rb") as f:
-        raw_samples = list(struct.unpack(f'{os.path.getsize("$TMP_PCM")//4}f', f.read()))
-    body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE, "samples": raw_samples}
-    if "$LANGUAGE": body["language"] = "$LANGUAGE"
-    if "$PROMPT":   body["initialPrompt"] = "$PROMPT"
-    result = cf_request(
-        "$WHISPER_URL/v1/transcriptions",
-        data=json.dumps(body).encode(),
-        extra_headers={"Content-Type": "application/json"},
-    )
-    raw_text = result["text"]
+    session = cf_request(f"{WHISPER_URL}/v1/transcriptions/sessions",
+                         data=json.dumps(session_body).encode(),
+                         extra_headers={"Content-Type": "application/json"})
+    session_id = session["sessionId"]
+    if DEBUG: print(f"[debug] whisper session:    {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    t0 = time.monotonic()
+    chunks = [samples[i:i+CHUNK_BYTES//4] for i in range(0, len(samples), CHUNK_BYTES//4)]
+    def send_chunk(chunk_bytes):
+        cf_request(f"{WHISPER_URL}/v1/transcriptions/sessions/{session_id}/chunks",
+                   data=chunk_bytes, extra_headers={"Content-Type": "application/octet-stream"})
+    for chunk in chunks:
+        send_chunk(struct.pack(f"{len(chunk)}f", *chunk))
+    if DEBUG: print(f"[debug] whisper upload:     {(time.monotonic()-t0)*1000:.0f}ms  ({len(chunks)} chunks)", file=sys.stderr)
+    t0 = time.monotonic()
+    result = cf_request(f"{WHISPER_URL}/v1/transcriptions/sessions/{session_id}/finalize",
+                        data=b"", extra_headers={"Content-Type": "application/json"})
+    if DEBUG: print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    return result["text"].strip()
+
+# Load PCM samples (needed for all paths)
+with open(TMP_PCM, "rb") as f:
+    raw = f.read()
+all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
+
+# --- Whisper transcription ---
+if DIARIZE:
+    import concurrent.futures as cf_futures
+    try:
+        import torch
+        from pyannote.audio import Pipeline as DiarizePipeline
+    except ImportError:
+        print("Error: --diarize requires: pip install pyannote.audio torch", file=sys.stderr)
+        sys.exit(1)
+    if not HF_TOKEN:
+        print("Error: --diarize requires HF_TOKEN in ~/.whisper.env (HuggingFace token)", file=sys.stderr)
+        sys.exit(1)
+
+    t0 = time.monotonic()
+    device = torch.device("cuda" if torch.cuda.is_available()
+                          else "mps" if torch.backends.mps.is_available()
+                          else "cpu")
+    pipeline = DiarizePipeline.from_pretrained(
+        "pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN)
+    pipeline.to(device)
+    diarization = pipeline(AUDIO_FILE)
+
+    # Collect and merge short same-speaker gaps
+    raw_segs = [(t.start, t.end, spk) for t, _, spk in diarization.itertracks(yield_label=True)]
+    segs = []
+    for start, end, spk in raw_segs:
+        if segs and segs[-1][2] == spk and start - segs[-1][1] < 0.5:
+            segs[-1][1] = end
+        else:
+            segs.append([start, end, spk])
+    if DEBUG:
+        print(f"[debug] diarize:            {(time.monotonic()-t0)*1000:.0f}ms  "
+              f"({len(segs)} segments, device={device})", file=sys.stderr)
+
+    # Transcribe all segments concurrently (single-shot per segment — fast for short clips)
+    def transcribe_segment(seg):
+        start, end, spk = seg
+        samples = all_samples[int(start * SAMPLE_RATE):int(end * SAMPLE_RATE)]
+        if len(samples) < 1600:  # skip <0.1s
+            return None
+        text = whisper_single(samples)
+        return (start, spk, text) if text else None
+
+    t0 = time.monotonic()
+    with cf_futures.ThreadPoolExecutor() as pool:
+        results = list(pool.map(transcribe_segment, segs))
+    results = sorted((r for r in results if r), key=lambda x: x[0])
+    if DEBUG:
+        print(f"[debug] whisper parallel:   {(time.monotonic()-t0)*1000:.0f}ms  "
+              f"({len(results)} segments)", file=sys.stderr)
+
+    # Assign readable speaker labels (SPEAKER_00 → Speaker 1)
+    speaker_map = {}
+    for _, spk, _ in results:
+        if spk not in speaker_map:
+            speaker_map[spk] = f"Speaker {len(speaker_map)+1}"
+    raw_text = "\n".join(f"[{speaker_map[spk]}] {text}" for _, spk, text in results)
+
+elif SINGLE:
+    t0 = time.monotonic()
+    raw_text = whisper_single(all_samples)
     if DEBUG:
         print(f"[debug] whisper single:     {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 else:
-    session_body = {"model": "$MODEL", "sampleRate": $SAMPLE_RATE}
-    if "$LANGUAGE": session_body["language"] = "$LANGUAGE"
-    if "$PROMPT":   session_body["initialPrompt"] = "$PROMPT"
-
-    t0 = time.monotonic()
-    session = cf_request(
-        "$WHISPER_URL/v1/transcriptions/sessions",
-        data=json.dumps(session_body).encode(),
-        extra_headers={"Content-Type": "application/json"},
-    )
-    session_id = session["sessionId"]
-    if DEBUG:
-        print(f"[debug] whisper session:    {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
-
-    t0 = time.monotonic()
-    chunk_count = 0
-    with open("$TMP_PCM", "rb") as f:
-        while True:
-            chunk = f.read(CHUNK_BYTES)
-            if not chunk:
-                break
-            cf_request(
-                f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/chunks",
-                data=chunk,
-                extra_headers={"Content-Type": "application/octet-stream"},
-            )
-            chunk_count += 1
-    if DEBUG:
-        print(f"[debug] whisper upload:     {(time.monotonic()-t0)*1000:.0f}ms  ({chunk_count} chunks)", file=sys.stderr)
-
-    t0 = time.monotonic()
-    result = cf_request(
-        f"$WHISPER_URL/v1/transcriptions/sessions/{session_id}/finalize",
-        data=b"",
-        extra_headers={"Content-Type": "application/json"},
-    )
-    raw_text = result["text"]
-    if DEBUG:
-        print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    raw_text = whisper_chunked(all_samples)
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
