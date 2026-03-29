@@ -283,27 +283,49 @@ def whisper_chunked(samples):
     if DEBUG: print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
     return result["text"].strip()
 
+do_cleanup = "$CLEANUP" == "true"
+llm_url = "$LLM_URL"
+json_output = "$JSON_OUTPUT" == "true"
+
 # --- Transcription ---
 if FROM_RAW:
     with open(FROM_RAW) as f:
         raw_text = f.read().strip()
+    llm_applied = False
     if DEBUG:
         print(f"[debug] loaded raw transcript from {FROM_RAW}", file=sys.stderr)
 
 elif DIARIZE:
+    # Check if LLM is reachable so we can pipeline it server-side
+    diarize_llm_url = ""
+    if do_cleanup:
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(f"{llm_url}/health", headers={**CF_HEADERS}), timeout=5)
+            diarize_llm_url = llm_url
+        except Exception:
+            pass
+
     t0 = time.monotonic()
     fields = {"model": MODEL}
-    if LANGUAGE:     fields["language"] = LANGUAGE
-    if PROMPT:       fields["initial_prompt"] = PROMPT
-    if NUM_SPEAKERS: fields["num_speakers"] = NUM_SPEAKERS
-    if MIN_SPEAKERS: fields["min_speakers"] = MIN_SPEAKERS
-    if MAX_SPEAKERS: fields["max_speakers"] = MAX_SPEAKERS
+    if LANGUAGE:        fields["language"] = LANGUAGE
+    if PROMPT:          fields["initial_prompt"] = PROMPT
+    if NUM_SPEAKERS:    fields["num_speakers"] = NUM_SPEAKERS
+    if MIN_SPEAKERS:    fields["min_speakers"] = MIN_SPEAKERS
+    if MAX_SPEAKERS:    fields["max_speakers"] = MAX_SPEAKERS
+    if diarize_llm_url: fields["llm_url"] = diarize_llm_url
+    if CONTEXT:         fields["context"] = CONTEXT
+    if TONE:            fields["tone"] = TONE
+    if DEBUG:
+        print(f"[debug] sending to diarize pipeline{' + LLM' if diarize_llm_url else ''}...", file=sys.stderr)
     result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
     raw_text = result["text"]
+    llm_applied = result.get("llm_applied", False)
     if DEBUG:
-        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms  (llm={'yes' if llm_applied else 'no'})", file=sys.stderr)
 
 else:
+    llm_applied = False
     with open(TMP_PCM, "rb") as f:
         raw = f.read()
     all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
@@ -316,7 +338,7 @@ else:
     else:
         raw_text = whisper_chunked(all_samples)
 
-# --- Save raw transcript ---
+# --- Save raw transcript (before LLM, skip if LLM already applied by diarize server) ---
 if RAW_OUTPUT and not FROM_RAW:
     with open(RAW_OUTPUT, "w") as f:
         f.write(raw_text)
@@ -324,9 +346,7 @@ if RAW_OUTPUT and not FROM_RAW:
         print(f"[debug] raw transcript saved to {RAW_OUTPUT}", file=sys.stderr)
 
 # --- LLM filler cleanup ---
-do_cleanup = "$CLEANUP" == "true"
-llm_url = "$LLM_URL"
-json_output = "$JSON_OUTPUT" == "true"
+do_cleanup = do_cleanup and not llm_applied
 
 # Split text at natural boundaries into word-limited chunks so each fits
 # within the LLM context window (input + output both need to fit in 8192 tokens).
@@ -416,11 +436,13 @@ if do_cleanup:
     t0 = time.monotonic()
     cleaned_parts = []
     for i, chunk in enumerate(chunks):
+        if DEBUG:
+            print(f"[debug] llm chunk {i+1}/{len(chunks)}: sending {len(chunk.split())} words...", file=sys.stderr, flush=True)
+        tc = time.monotonic()
         part, finish_reason = llm_call(chunk)
         cleaned_parts.append(part)
         if DEBUG:
-            print(f"[debug] llm chunk {i+1}/{len(chunks)}: {len(chunk.split())} words in → "
-                  f"{len(part.split())} words out, finish={finish_reason}", file=sys.stderr)
+            print(f"[debug] llm chunk {i+1}/{len(chunks)}: done  {len(part.split())} words out  {(time.monotonic()-tc)*1000:.0f}ms  finish={finish_reason}", file=sys.stderr)
     cleaned = "\n\n".join(cleaned_parts) if len(cleaned_parts) > 1 else cleaned_parts[0]
 
     glossary = load_glossary()
