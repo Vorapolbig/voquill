@@ -17,8 +17,8 @@
 #   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
 #   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
 #   -s, --single    Send audio as one request instead of chunks (simpler, no streaming)
-#   --diarize       Detect multiple speakers via the diarize pipeline service
-#                   Requires diarize_server.py running on the server (see scripts/diarize_server.py)
+#   --diarize       Detect multiple speakers via the server-side diarize pipeline
+#                   (see scripts/services/README.md for server setup)
 #   --diarize-url   Diarize service URL (default: https://diarize.vorapol.cv)
 #   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
 #                   (default: ~/.whisper-glossary.json if it exists)
@@ -120,18 +120,20 @@ if $LOCAL; then
   fi
 fi
 
-TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
-trap "rm -f $TMP_PCM" EXIT
+if ! $DIARIZE; then
+  TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
+  trap "rm -f $TMP_PCM" EXIT
 
-if $DEBUG; then
-  T0=$(python3 -c "import time; print(int(time.monotonic()*1000))")
-fi
+  if $DEBUG; then
+    T0=$(python3 -c "import time; print(int(time.monotonic()*1000))")
+  fi
 
-ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
+  ffmpeg -i "$AUDIO_FILE" -ar $SAMPLE_RATE -ac 1 -f f32le "$TMP_PCM" -y -loglevel quiet
 
-if $DEBUG; then
-  T1=$(python3 -c "import time; print(int(time.monotonic()*1000))")
-  echo "[debug] ffmpeg convert:    $((T1 - T0))ms" >&2
+  if $DEBUG; then
+    T1=$(python3 -c "import time; print(int(time.monotonic()*1000))")
+    echo "[debug] ffmpeg convert:    $((T1 - T0))ms" >&2
+  fi
 fi
 
 python3 - <<PYEOF
