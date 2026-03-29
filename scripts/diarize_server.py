@@ -182,11 +182,11 @@ async def diarize(
 ):
     with tempfile.TemporaryDirectory() as tmpdir:
         ext = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
-        audio_path = os.path.join(tmpdir, f"audio{ext}")
+        audio_path = os.path.join(tmpdir, f"input{ext}")
         with open(audio_path, "wb") as f:
             f.write(await file.read())
 
-        wav_path = os.path.join(tmpdir, "audio.wav")
+        wav_path = os.path.join(tmpdir, "converted.wav")
         subprocess.run(
             ["ffmpeg", "-y", "-i", audio_path, "-ar", str(SAMPLE_RATE), "-ac", "1", wav_path],
             check=True, capture_output=True,
