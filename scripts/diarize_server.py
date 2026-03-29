@@ -107,6 +107,9 @@ async def diarize(
     model: str = Form("turbo"),
     language: str = Form(""),
     initial_prompt: str = Form(""),
+    num_speakers: int = Form(0),
+    min_speakers: int = Form(0),
+    max_speakers: int = Form(0),
 ):
     with tempfile.TemporaryDirectory() as tmpdir:
         ext = os.path.splitext(file.filename or "audio.wav")[1] or ".wav"
@@ -132,7 +135,11 @@ async def diarize(
         all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
 
         # Diarize using the WAV (soundfile-compatible)
-        diarization = _pipeline(wav_path)
+        diarize_kwargs = {}
+        if num_speakers: diarize_kwargs["num_speakers"] = num_speakers
+        if min_speakers: diarize_kwargs["min_speakers"] = min_speakers
+        if max_speakers: diarize_kwargs["max_speakers"] = max_speakers
+        diarization = _pipeline(wav_path, **diarize_kwargs)
         turns = [(seg.start, seg.end, spk)
                  for seg, _, spk in diarization.itertracks(yield_label=True)]
         turns = _merge_segments(turns)

@@ -20,6 +20,11 @@
 #   --diarize       Detect multiple speakers via the server-side diarize pipeline
 #                   (see scripts/services/README.md for server setup)
 #   --diarize-url   Diarize service URL (default: https://diarize.vorapol.cv)
+#   --num-speakers  Exact number of speakers (helps diarization accuracy)
+#   --min-speakers  Minimum number of speakers
+#   --max-speakers  Maximum number of speakers
+#   --from-raw      Skip transcription and run LLM on an existing raw transcript file
+#                   (raw transcripts are auto-saved to <audio-file>.raw.txt)
 #   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
 #                   (default: ~/.whisper-glossary.json if it exists)
 #                   Format: {"wrong phrase": "correct phrase", ...}
@@ -50,6 +55,10 @@ DEBUG=false
 LOCAL=false
 SINGLE=false
 DIARIZE=false
+NUM_SPEAKERS=""
+MIN_SPEAKERS=""
+MAX_SPEAKERS=""
+FROM_RAW=""
 CONTEXT=""
 TONE=""
 GLOSSARY=""
@@ -67,8 +76,12 @@ while [[ $# -gt 0 ]]; do
     -j|--json)       JSON_OUTPUT=true; shift ;;
     -d|--debug)      DEBUG=true;       shift ;;
     -s|--single)     SINGLE=true;      shift ;;
-    --diarize)       DIARIZE=true;     shift ;;
-    --diarize-url)   DIARIZE_URL="$2"; shift 2 ;;
+    --diarize)       DIARIZE=true;          shift ;;
+    --diarize-url)   DIARIZE_URL="$2";     shift 2 ;;
+    --num-speakers)  NUM_SPEAKERS="$2";    shift 2 ;;
+    --min-speakers)  MIN_SPEAKERS="$2";    shift 2 ;;
+    --max-speakers)  MAX_SPEAKERS="$2";    shift 2 ;;
+    --from-raw)      FROM_RAW="$2";        shift 2 ;;
     --local)         LOCAL=true;       shift ;;
     -c|--context)    CONTEXT="$2";     shift 2 ;;
     -t|--tone)       TONE="$2";        shift 2 ;;
@@ -79,11 +92,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[ -z "$AUDIO_FILE" ] && usage
-
-if [ ! -f "$AUDIO_FILE" ]; then
-  echo "Error: file not found: $AUDIO_FILE" >&2
-  exit 1
+if [ -z "$FROM_RAW" ]; then
+  [ -z "$AUDIO_FILE" ] && usage
+  if [ ! -f "$AUDIO_FILE" ]; then
+    echo "Error: file not found: $AUDIO_FILE" >&2
+    exit 1
+  fi
+else
+  if [ ! -f "$FROM_RAW" ]; then
+    echo "Error: raw transcript file not found: $FROM_RAW" >&2
+    exit 1
+  fi
 fi
 
 for ENV_FILE in "$HOME/.whisper.env" "$HOME/.env.whisper"; do
@@ -121,7 +140,7 @@ if $LOCAL; then
 fi
 
 TMP_PCM=""
-if ! $DIARIZE; then
+if ! $DIARIZE && [ -z "$FROM_RAW" ]; then
   TMP_PCM=$(mktemp /tmp/whisper_XXXXXX.f32)
   trap "rm -f $TMP_PCM" EXIT
 
@@ -163,6 +182,7 @@ DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
 SINGLE = "$SINGLE" == "true"
 DIARIZE = "$DIARIZE" == "true"
+FROM_RAW = "$FROM_RAW"
 WHISPER_URL = "$WHISPER_URL"
 DIARIZE_URL = "$DIARIZE_URL"
 MODEL = "$MODEL"
@@ -171,8 +191,12 @@ LANGUAGE = "$LANGUAGE"
 PROMPT = "$PROMPT"
 TMP_PCM = "$TMP_PCM"
 AUDIO_FILE = "$AUDIO_FILE"
+NUM_SPEAKERS = "$NUM_SPEAKERS"
+MIN_SPEAKERS = "$MIN_SPEAKERS"
+MAX_SPEAKERS = "$MAX_SPEAKERS"
 CONTEXT = os.environ.get("CONTEXT", "")
 TONE = os.environ.get("TONE", "")
+RAW_OUTPUT = AUDIO_FILE + ".raw.txt" if AUDIO_FILE else ""
 
 def load_glossary():
     path = os.environ.get("GLOSSARY", "")
@@ -259,12 +283,21 @@ def whisper_chunked(samples):
     if DEBUG: print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
     return result["text"].strip()
 
-# --- Whisper transcription ---
-if DIARIZE:
+# --- Transcription ---
+if FROM_RAW:
+    with open(FROM_RAW) as f:
+        raw_text = f.read().strip()
+    if DEBUG:
+        print(f"[debug] loaded raw transcript from {FROM_RAW}", file=sys.stderr)
+
+elif DIARIZE:
     t0 = time.monotonic()
     fields = {"model": MODEL}
-    if LANGUAGE: fields["language"] = LANGUAGE
-    if PROMPT:   fields["initial_prompt"] = PROMPT
+    if LANGUAGE:     fields["language"] = LANGUAGE
+    if PROMPT:       fields["initial_prompt"] = PROMPT
+    if NUM_SPEAKERS: fields["num_speakers"] = NUM_SPEAKERS
+    if MIN_SPEAKERS: fields["min_speakers"] = MIN_SPEAKERS
+    if MAX_SPEAKERS: fields["max_speakers"] = MAX_SPEAKERS
     result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
     raw_text = result["text"]
     if DEBUG:
@@ -282,6 +315,13 @@ else:
             print(f"[debug] whisper single:     {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
     else:
         raw_text = whisper_chunked(all_samples)
+
+# --- Save raw transcript ---
+if RAW_OUTPUT and not FROM_RAW:
+    with open(RAW_OUTPUT, "w") as f:
+        f.write(raw_text)
+    if DEBUG:
+        print(f"[debug] raw transcript saved to {RAW_OUTPUT}", file=sys.stderr)
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
