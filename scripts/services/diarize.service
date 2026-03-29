@@ -1,0 +1,16 @@
+[Unit]
+Description=Diarization + Transcription Pipeline Service
+After=network.target whisper-gpu.service
+
+[Service]
+User=vorapol
+Environment=DIARIZE_HOST=0.0.0.0
+Environment=DIARIZE_PORT=7773
+Environment=WHISPER_URL=http://localhost:7772
+EnvironmentFile=/home/vorapol/.whisper-secrets
+ExecStart=/usr/bin/python3 /home/vorapol/Projects/voquill/scripts/diarize_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

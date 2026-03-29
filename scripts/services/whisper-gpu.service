@@ -1,0 +1,15 @@
+[Unit]
+Description=Whisper GPU Transcription Sidecar
+After=network.target
+
+[Service]
+User=vorapol
+Environment=RUST_TRANSCRIPTION_HOST=0.0.0.0
+Environment=RUST_TRANSCRIPTION_PORT=7772
+Environment=RUST_TRANSCRIPTION_MODELS_DIR=/home/vorapol/models/whisper
+ExecStart=/home/vorapol/Projects/voquill/packages/rust_transcription/target/debug/rust-transcription-gpu
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
