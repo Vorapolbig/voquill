@@ -17,8 +17,9 @@
 #   -c, --context   App/context hint injected into LLM prompt e.g. "Slack", "VS Code", "email"
 #   -t, --tone      Tone hint e.g. "casual", "professional", "technical" (default: auto)
 #   -s, --single    Send audio as one request instead of chunks (simpler, no streaming)
-#   --diarize       Detect multiple speakers (requires: pip install pyannote.audio torch)
-#                   Set HF_TOKEN in ~/.whisper.env (HuggingFace token for pyannote models)
+#   --diarize       Detect multiple speakers via the diarize pipeline service
+#                   Requires diarize_server.py running on the server (see scripts/diarize_server.py)
+#   --diarize-url   Diarize service URL (default: https://diarize.vorapol.cv)
 #   -g, --glossary  Path to JSON glossary file for find-and-replace corrections
 #                   (default: ~/.whisper-glossary.json if it exists)
 #                   Format: {"wrong phrase": "correct phrase", ...}
@@ -42,6 +43,7 @@ LANGUAGE=""
 PROMPT=""
 WHISPER_URL="https://whisper.vorapol.cv"
 LLM_URL="https://llm.vorapol.cv"
+DIARIZE_URL="https://diarize.vorapol.cv"
 CLEANUP=true
 JSON_OUTPUT=false
 DEBUG=false
@@ -66,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     -d|--debug)      DEBUG=true;       shift ;;
     -s|--single)     SINGLE=true;      shift ;;
     --diarize)       DIARIZE=true;     shift ;;
+    --diarize-url)   DIARIZE_URL="$2"; shift 2 ;;
     --local)         LOCAL=true;       shift ;;
     -c|--context)    CONTEXT="$2";     shift 2 ;;
     -t|--tone)       TONE="$2";        shift 2 ;;
@@ -104,13 +107,13 @@ if [ -z "$GLOSSARY" ] && [ -f "$HOME/.whisper-glossary.json" ]; then
   GLOSSARY="$HOME/.whisper-glossary.json"
 fi
 
-HF_TOKEN="${HF_TOKEN:-}"
-export CF_ID CF_SECRET CONTEXT TONE GLOSSARY SINGLE DIARIZE HF_TOKEN
+export CF_ID CF_SECRET CONTEXT TONE GLOSSARY SINGLE DIARIZE
 
 if $LOCAL; then
   if python3 -c "import socket; s=socket.create_connection(('$LOCAL_IP', 7772), timeout=1); s.close()" 2>/dev/null; then
     WHISPER_URL="http://$LOCAL_IP:7772"
     LLM_URL="http://$LOCAL_IP:8766"
+    DIARIZE_URL="http://$LOCAL_IP:7773"
     $DEBUG && echo "[debug] local: connected to $LOCAL_IP, using LAN" >&2
   else
     $DEBUG && echo "[debug] local: $LOCAL_IP unreachable, falling back to Cloudflare" >&2
@@ -157,8 +160,8 @@ DEBUG = "$DEBUG" == "true"
 LOCAL = "$LOCAL" == "true"
 SINGLE = "$SINGLE" == "true"
 DIARIZE = "$DIARIZE" == "true"
-HF_TOKEN = os.environ.get("HF_TOKEN", "")
 WHISPER_URL = "$WHISPER_URL"
+DIARIZE_URL = "$DIARIZE_URL"
 MODEL = "$MODEL"
 SAMPLE_RATE = $SAMPLE_RATE
 LANGUAGE = "$LANGUAGE"
@@ -197,6 +200,29 @@ def cf_request(url, data=None, extra_headers=None):
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)
 
+def multipart_cf_request(url, fields, file_path):
+    boundary = ("----FormBoundary" + str(int(time.time()))).encode()
+    crlf = b"\r\n"
+    body = []
+    for name, value in fields.items():
+        body += [b"--" + boundary, f'Content-Disposition: form-data; name="{name}"'.encode(), b"", value.encode()]
+    filename = os.path.basename(file_path).encode()
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+    body += [
+        b"--" + boundary,
+        b'Content-Disposition: form-data; name="file"; filename="' + filename + b'"',
+        b"Content-Type: application/octet-stream",
+        b"",
+        file_data,
+    ]
+    body.append(b"--" + boundary + b"--")
+    body_bytes = crlf.join(body)
+    headers = {**CF_HEADERS, "Content-Type": f"multipart/form-data; boundary={boundary.decode()}"}
+    req = urllib.request.Request(url, data=body_bytes, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        return json.load(resp)
+
 # --- Helpers ---
 def whisper_single(samples):
     body = {"model": MODEL, "sampleRate": SAMPLE_RATE, "samples": samples}
@@ -230,76 +256,29 @@ def whisper_chunked(samples):
     if DEBUG: print(f"[debug] whisper finalize:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
     return result["text"].strip()
 
-# Load PCM samples (needed for all paths)
-with open(TMP_PCM, "rb") as f:
-    raw = f.read()
-all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
-
 # --- Whisper transcription ---
 if DIARIZE:
-    import concurrent.futures as cf_futures
-    try:
-        import torch
-        from pyannote.audio import Pipeline as DiarizePipeline
-    except ImportError:
-        print("Error: --diarize requires: pip install pyannote.audio torch", file=sys.stderr)
-        sys.exit(1)
-    if not HF_TOKEN:
-        print("Error: --diarize requires HF_TOKEN in ~/.whisper.env (HuggingFace token)", file=sys.stderr)
-        sys.exit(1)
-
     t0 = time.monotonic()
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          else "mps" if torch.backends.mps.is_available()
-                          else "cpu")
-    pipeline = DiarizePipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1", use_auth_token=HF_TOKEN)
-    pipeline.to(device)
-    diarization = pipeline(AUDIO_FILE)
-
-    # Collect and merge short same-speaker gaps
-    raw_segs = [(t.start, t.end, spk) for t, _, spk in diarization.itertracks(yield_label=True)]
-    segs = []
-    for start, end, spk in raw_segs:
-        if segs and segs[-1][2] == spk and start - segs[-1][1] < 0.5:
-            segs[-1][1] = end
-        else:
-            segs.append([start, end, spk])
+    fields = {"model": MODEL}
+    if LANGUAGE: fields["language"] = LANGUAGE
+    if PROMPT:   fields["initial_prompt"] = PROMPT
+    result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
+    raw_text = result["text"]
     if DEBUG:
-        print(f"[debug] diarize:            {(time.monotonic()-t0)*1000:.0f}ms  "
-              f"({len(segs)} segments, device={device})", file=sys.stderr)
+        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 
-    # Transcribe all segments concurrently (single-shot per segment — fast for short clips)
-    def transcribe_segment(seg):
-        start, end, spk = seg
-        samples = all_samples[int(start * SAMPLE_RATE):int(end * SAMPLE_RATE)]
-        if len(samples) < 1600:  # skip <0.1s
-            return None
-        text = whisper_single(samples)
-        return (start, spk, text) if text else None
-
-    t0 = time.monotonic()
-    with cf_futures.ThreadPoolExecutor() as pool:
-        results = list(pool.map(transcribe_segment, segs))
-    results = sorted((r for r in results if r), key=lambda x: x[0])
-    if DEBUG:
-        print(f"[debug] whisper parallel:   {(time.monotonic()-t0)*1000:.0f}ms  "
-              f"({len(results)} segments)", file=sys.stderr)
-
-    # Assign readable speaker labels (SPEAKER_00 → Speaker 1)
-    speaker_map = {}
-    for _, spk, _ in results:
-        if spk not in speaker_map:
-            speaker_map[spk] = f"Speaker {len(speaker_map)+1}"
-    raw_text = "\n".join(f"[{speaker_map[spk]}] {text}" for _, spk, text in results)
-
-elif SINGLE:
-    t0 = time.monotonic()
-    raw_text = whisper_single(all_samples)
-    if DEBUG:
-        print(f"[debug] whisper single:     {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
 else:
-    raw_text = whisper_chunked(all_samples)
+    with open(TMP_PCM, "rb") as f:
+        raw = f.read()
+    all_samples = list(struct.unpack(f"{len(raw)//4}f", raw))
+
+    if SINGLE:
+        t0 = time.monotonic()
+        raw_text = whisper_single(all_samples)
+        if DEBUG:
+            print(f"[debug] whisper single:     {(time.monotonic()-t0)*1000:.0f}ms", file=sys.stderr)
+    else:
+        raw_text = whisper_chunked(all_samples)
 
 # --- LLM filler cleanup ---
 do_cleanup = "$CLEANUP" == "true"
