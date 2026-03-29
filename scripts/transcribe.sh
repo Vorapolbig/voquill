@@ -227,7 +227,7 @@ def cf_request(url, data=None, extra_headers=None):
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)
 
-def multipart_cf_request(url, fields, file_path):
+def _build_multipart(fields, file_path):
     boundary = ("----FormBoundary" + str(int(time.time()))).encode()
     crlf = b"\r\n"
     body = []
@@ -244,11 +244,25 @@ def multipart_cf_request(url, fields, file_path):
         file_data,
     ]
     body.append(b"--" + boundary + b"--")
-    body_bytes = crlf.join(body)
-    headers = {**CF_HEADERS, "Content-Type": f"multipart/form-data; boundary={boundary.decode()}"}
+    return crlf.join(body), boundary.decode()
+
+def multipart_cf_request(url, fields, file_path):
+    body_bytes, boundary = _build_multipart(fields, file_path)
+    headers = {**CF_HEADERS, "Content-Type": f"multipart/form-data; boundary={boundary}"}
     req = urllib.request.Request(url, data=body_bytes, headers=headers)
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)
+
+def multipart_cf_request_stream(url, fields, file_path):
+    """Yields parsed JSON objects as NDJSON lines arrive from the server."""
+    body_bytes, boundary = _build_multipart(fields, file_path)
+    headers = {**CF_HEADERS, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+    req = urllib.request.Request(url, data=body_bytes, headers=headers)
+    with urllib.request.urlopen(req) as resp:
+        for raw_line in resp:
+            line = raw_line.decode("utf-8").strip()
+            if line:
+                yield json.loads(line)
 
 # --- Helpers ---
 def whisper_single(samples):
@@ -296,7 +310,7 @@ if FROM_RAW:
         print(f"[debug] loaded raw transcript from {FROM_RAW}", file=sys.stderr)
 
 elif DIARIZE:
-    # Check if LLM is reachable so we can pipeline it server-side
+    # Probe LLM so we can pipeline it server-side
     diarize_llm_url = ""
     if do_cleanup:
         try:
@@ -306,7 +320,6 @@ elif DIARIZE:
         except Exception:
             pass
 
-    t0 = time.monotonic()
     fields = {"model": MODEL}
     if LANGUAGE:        fields["language"] = LANGUAGE
     if PROMPT:          fields["initial_prompt"] = PROMPT
@@ -316,27 +329,28 @@ elif DIARIZE:
     if diarize_llm_url: fields["llm_url"] = diarize_llm_url
     if CONTEXT:         fields["context"] = CONTEXT
     if TONE:            fields["tone"] = TONE
+
     if DEBUG:
         print(f"[debug] sending to diarize pipeline{' + LLM' if diarize_llm_url else ''}...", file=sys.stderr, flush=True)
 
-    # Ticker: print elapsed time every 10s so the user knows it's alive
-    _stop_ticker = threading.Event()
-    def _ticker():
-        n = 0
-        while not _stop_ticker.wait(10):
-            n += 10
-            print(f"[debug] ... still running ({n}s elapsed)", file=sys.stderr, flush=True)
-    ticker = threading.Thread(target=_ticker, daemon=True)
-    ticker.start()
+    t0 = time.monotonic()
+    received_segs = []
+    meta = {}
+    for item in multipart_cf_request_stream(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE):
+        if item["type"] == "segment":
+            received_segs.append(item)
+            if DEBUG:
+                preview = item["text"][:70] + ("…" if len(item["text"]) > 70 else "")
+                print(f"[debug] seg {len(received_segs):3d}: [{item['speaker']}] {preview}", file=sys.stderr, flush=True)
+        elif item["type"] == "done":
+            meta = item
 
-    result = multipart_cf_request(f"{DIARIZE_URL}/v1/diarize", fields, AUDIO_FILE)
-    _stop_ticker.set()
-
-    raw_text = result["text"]
-    llm_applied = result.get("llm_applied", False)
-    segments = result.get("segments", "?")
+    received_segs.sort(key=lambda x: x["idx"])
+    raw_text = "\n".join(f"[{s['speaker']}] {s['text']}" for s in received_segs)
+    llm_applied = meta.get("llm_applied", False)
     if DEBUG:
-        print(f"[debug] diarize pipeline:   {(time.monotonic()-t0)*1000:.0f}ms  segments={segments}  llm={'yes' if llm_applied else 'no'}", file=sys.stderr)
+        print(f"[debug] diarize complete:   {(time.monotonic()-t0)*1000:.0f}ms  "
+              f"turns={meta.get('total_turns', '?')}  received={len(received_segs)}  llm={'yes' if llm_applied else 'no'}", file=sys.stderr)
 
 else:
     llm_applied = False

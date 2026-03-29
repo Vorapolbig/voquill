@@ -11,10 +11,13 @@ POST /v1/diarize
     num_speakers    exact speaker count hint for pyannote
     min_speakers    minimum speaker count hint
     max_speakers    maximum speaker count hint
+    merge_gap       seconds of silence to merge same-speaker turns (default: 1.5)
     llm_url         if set, clean each segment via LLM concurrently with transcription
     context         context hint for LLM system prompt (e.g. "Slack", "VS Code")
     tone            tone hint for LLM system prompt (e.g. "casual", "technical")
-  Returns: {"text": "...", "llm_applied": true/false}
+  Returns: NDJSON stream of:
+    {"type": "segment", "idx": N, "start": 1.2, "speaker": "Speaker 1", "text": "..."}
+    {"type": "done", "total_turns": N, "llm_applied": true/false}
 
 GET /health
   Returns: {"status": "ok", "device": "cuda"}
@@ -26,6 +29,7 @@ Environment variables:
   WHISPER_URL     upstream Whisper server (default: http://localhost:7772)
   HF_TOKEN        HuggingFace token for pyannote model access
 """
+import asyncio
 import json
 import os
 import queue
@@ -41,7 +45,7 @@ from contextlib import asynccontextmanager
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pyannote.audio import Pipeline as DiarizePipeline
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://localhost:7772")
@@ -49,7 +53,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HOST = os.environ.get("DIARIZE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DIARIZE_PORT", "7773"))
 SAMPLE_RATE = 16000
-MERGE_GAP = 0.5
+MIN_SEGMENT_SAMPLES = SAMPLE_RATE // 2  # skip segments shorter than 0.5s
 
 _pipeline: DiarizePipeline | None = None
 _device: torch.device | None = None
@@ -147,10 +151,10 @@ def _build_system_prompt(context: str, tone: str) -> str:
     ]))
 
 
-def _merge_segments(turns: list) -> list:
+def _merge_segments(turns: list, merge_gap: float) -> list:
     merged = []
     for start, end, speaker in turns:
-        if merged and merged[-1][2] == speaker and start - merged[-1][1] <= MERGE_GAP:
+        if merged and merged[-1][2] == speaker and start - merged[-1][1] <= merge_gap:
             merged[-1][1] = end
         else:
             merged.append([start, end, speaker])
@@ -171,6 +175,7 @@ async def diarize(
     num_speakers: int = Form(0),
     min_speakers: int = Form(0),
     max_speakers: int = Form(0),
+    merge_gap: float = Form(1.5),
     llm_url: str = Form(""),
     context: str = Form(""),
     tone: str = Form(""),
@@ -201,48 +206,53 @@ async def diarize(
         if max_speakers:  diarize_kwargs["max_speakers"] = max_speakers
 
         t0 = time.monotonic()
-        diarization = _pipeline(wav_path, **diarize_kwargs)
+        # Run pyannote in executor to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        diarization = await loop.run_in_executor(
+            None, lambda: _pipeline(wav_path, **diarize_kwargs))
         turns = [(seg.start, seg.end, spk)
                  for seg, _, spk in diarization.itertracks(yield_label=True)]
-        turns = _merge_segments(turns)
-        print(f"[diarize] pyannote: {(time.monotonic()-t0)*1000:.0f}ms  {len(turns)} segments", file=sys.stderr, flush=True)
+        turns = _merge_segments(turns, merge_gap)
+        print(f"[diarize] pyannote: {(time.monotonic()-t0)*1000:.0f}ms  {len(turns)} segments  merge_gap={merge_gap}s", file=sys.stderr, flush=True)
+        # all_samples is a plain list — safe to use after tmpdir is gone
 
-        speaker_map: dict[str, str] = {}
+    use_llm = bool(llm_url)
+    system_prompt = _build_system_prompt(context, tone) if use_llm else ""
+    speaker_map: dict[str, str] = {}
 
-        def speaker_label(spk: str) -> str:
-            if spk not in speaker_map:
-                speaker_map[spk] = f"Speaker {len(speaker_map) + 1}"
-            return speaker_map[spk]
+    def speaker_label(spk: str) -> str:
+        if spk not in speaker_map:
+            speaker_map[spk] = f"Speaker {len(speaker_map) + 1}"
+        return speaker_map[spk]
 
-        use_llm = bool(llm_url)
-        system_prompt = _build_system_prompt(context, tone) if use_llm else ""
+    result_queue: queue.Queue = queue.Queue()
 
-        # LLM worker — drains the queue while the main thread keeps feeding whisper results
-        seg_queue: queue.Queue = queue.Queue()
-        llm_results: dict[int, tuple] = {}
+    def process_segments():
+        seg_llm_queue: queue.Queue = queue.Queue()
+        llm_done = threading.Event()
 
         def llm_worker():
             while True:
-                item = seg_queue.get()
+                item = seg_llm_queue.get()
                 if item is None:
-                    break
-                idx, start, spk, raw_text = item
+                    llm_done.set()
+                    return
+                idx, start, spk, text = item
                 t = time.monotonic()
-                cleaned = _llm_call(raw_text, llm_url, system_prompt)
-                print(f"[diarize] LLM  seg {idx+1}: {len(raw_text.split()):3d}w → {(time.monotonic()-t)*1000:.0f}ms", file=sys.stderr, flush=True)
-                llm_results[idx] = (start, spk, cleaned)
+                cleaned = _llm_call(text, llm_url, system_prompt)
+                print(f"[diarize] LLM  seg {idx+1}: {len(text.split()):3d}w → {(time.monotonic()-t)*1000:.0f}ms", file=sys.stderr, flush=True)
+                result_queue.put({"type": "segment", "idx": idx, "start": start,
+                                  "speaker": speaker_label(spk), "text": cleaned})
 
         if use_llm:
-            llm_thread = threading.Thread(target=llm_worker, daemon=True)
-            llm_thread.start()
+            threading.Thread(target=llm_worker, daemon=True).start()
 
-        raw_results: list[tuple] = []
         for i, seg in enumerate(turns):
             start, end, spk = seg
             s = int(start * SAMPLE_RATE)
             e = int(end * SAMPLE_RATE)
             samples = all_samples[s:e]
-            if len(samples) < 1600:
+            if len(samples) < MIN_SEGMENT_SAMPLES:
                 continue
             t = time.monotonic()
             text = _whisper_segment(samples, model, language, initial_prompt)
@@ -251,19 +261,27 @@ async def diarize(
                 continue
             label = speaker_label(spk)
             if use_llm:
-                seg_queue.put((i, start, spk, text))
+                seg_llm_queue.put((i, start, spk, text))
             else:
-                raw_results.append((start, spk, f"[{label}] {text}"))
+                result_queue.put({"type": "segment", "idx": i, "start": start,
+                                  "speaker": label, "text": text})
 
         if use_llm:
-            seg_queue.put(None)  # sentinel — signals worker to stop
-            llm_thread.join()
-            ordered = sorted(llm_results.values(), key=lambda x: x[0])
-            transcript = "\n".join(f"[{speaker_label(spk)}] {text}" for _, spk, text in ordered)
-        else:
-            transcript = "\n".join(line for _, _, line in sorted(raw_results, key=lambda x: x[0]))
+            seg_llm_queue.put(None)
+            llm_done.wait()
 
-        return JSONResponse({"text": transcript, "llm_applied": use_llm, "segments": len(turns)})
+        result_queue.put({"type": "done", "total_turns": len(turns), "llm_applied": use_llm})
+
+    threading.Thread(target=process_segments, daemon=True).start()
+
+    async def generate():
+        while True:
+            item = await loop.run_in_executor(None, result_queue.get)
+            yield json.dumps(item) + "\n"
+            if item.get("type") == "done":
+                return
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 
 if __name__ == "__main__":
