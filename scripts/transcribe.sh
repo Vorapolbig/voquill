@@ -198,6 +198,16 @@ CONTEXT = os.environ.get("CONTEXT", "")
 TONE = os.environ.get("TONE", "")
 RAW_OUTPUT = AUDIO_FILE + ".raw.txt" if AUDIO_FILE else ""
 
+if AUDIO_FILE:
+    class _Tee:
+        def __init__(self, *files): self.files = files
+        def write(self, data):
+            for f in self.files: f.write(data)
+        def flush(self):
+            for f in self.files: f.flush()
+    _log_file = open(AUDIO_FILE + ".log", "w")
+    sys.stderr = _Tee(sys.__stderr__, _log_file)
+
 def load_glossary():
     path = os.environ.get("GLOSSARY", "")
     if not path or not os.path.exists(path):

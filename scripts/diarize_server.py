@@ -52,6 +52,18 @@ WHISPER_URL = os.environ.get("WHISPER_URL", "http://localhost:7772")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HOST = os.environ.get("DIARIZE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DIARIZE_PORT", "7773"))
+
+_log_path = os.environ.get("DIARIZE_LOG", "/tmp/diarize.log")
+_log_fh = open(_log_path, "a", buffering=1)
+
+class _Tee:
+    def __init__(self, *files): self.files = files
+    def write(self, data):
+        for f in self.files: f.write(data)
+    def flush(self):
+        for f in self.files: f.flush()
+
+sys.stderr = _Tee(sys.__stderr__, _log_fh)
 SAMPLE_RATE = 16000
 MIN_SEGMENT_SAMPLES = SAMPLE_RATE // 2  # skip segments shorter than 0.5s
 
