@@ -26,6 +26,7 @@ Dependencies: pip install fastapi uvicorn pyannote.audio torch
 Environment variables:
   DIARIZE_HOST    bind host (default: 0.0.0.0)
   DIARIZE_PORT    bind port (default: 7773)
+  DIARIZE_LOG     log file path (default: /tmp/diarize.log)
   WHISPER_URL     upstream Whisper server (default: http://localhost:7772)
   HF_TOKEN        HuggingFace token for pyannote model access
 """
@@ -45,27 +46,19 @@ from contextlib import asynccontextmanager
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pyannote.audio import Pipeline as DiarizePipeline
+
+from llm_utils import build_system_prompt, llm_call, setup_log_tee
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://localhost:7772")
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HOST = os.environ.get("DIARIZE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("DIARIZE_PORT", "7773"))
-
-_log_path = os.environ.get("DIARIZE_LOG", "/tmp/diarize.log")
-_log_fh = open(_log_path, "a", buffering=1)
-
-class _Tee:
-    def __init__(self, *files): self.files = files
-    def write(self, data):
-        for f in self.files: f.write(data)
-    def flush(self):
-        for f in self.files: f.flush()
-
-sys.stderr = _Tee(sys.__stderr__, _log_fh)
 SAMPLE_RATE = 16000
 MIN_SEGMENT_SAMPLES = SAMPLE_RATE // 2  # skip segments shorter than 0.5s
+
+setup_log_tee(os.environ.get("DIARIZE_LOG", "/tmp/diarize.log"))
 
 _pipeline: DiarizePipeline | None = None
 _device: torch.device | None = None
@@ -113,54 +106,6 @@ def _whisper_segment(samples: list[float], model: str, language: str, initial_pr
     )
     with urllib.request.urlopen(req) as resp:
         return json.load(resp)["text"].strip()
-
-
-def _llm_call(text: str, llm_url: str, system_prompt: str) -> str:
-    payload = json.dumps({
-        "model": "qwen3.5",
-        "chat_template_kwargs": {"enable_thinking": False},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text},
-        ],
-        "temperature": 0.1,
-        "max_tokens": 2048,
-        "stop": ["<|im_end|>", "<|endoftext|>"],
-    }).encode()
-    req = urllib.request.Request(
-        f"{llm_url}/v1/chat/completions",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req) as resp:
-        result = json.load(resp)["choices"][0]["message"]["content"]
-    if "</think>" in result:
-        result = result.split("</think>")[-1].strip()
-    return result
-
-
-def _build_system_prompt(context: str, tone: str) -> str:
-    return "\n".join(filter(None, [
-        "You are a highly skilled editor specialising in cleaning up raw speech-to-text transcripts.",
-        "Your goal is to produce the clean typed version of what the user intended to say, not a literal transcription.",
-        "",
-        "Rules:",
-        "- WORD CHOICE: Preserve the speaker's word choice and voice",
-        "- STRUCTURE: Refine to read like naturally written text without materially changing what the speaker said",
-        "- DISFLUENCIES: Remove filler words (um, uh, like, you know, so yeah), false starts, and stutters. Keep meaningful exclamations.",
-        "- SELF CORRECTIONS: If the speaker corrects themselves, keep only the final intended version",
-        "- INSTRUCTIONS: If the speaker gives a formatting command (e.g. 'make that a bulleted list', 'put that in code'), execute it — do not transcribe it",
-        "- TECHNICAL: Preserve and correctly format technical terms, variable names (camelCase, snake_case, PascalCase), filenames, and code snippets in backticks",
-        "- SYMBOLS: Convert spoken cues: 'hashtag X' → '#X', 'at name' → '@name'",
-        "- LISTS: Format bulleted lists when the speaker enumerates items",
-        "- PARAGRAPHS: Split into paragraphs at natural breaks in thought",
-        "- EMOJIS: Convert spoken emoji descriptions to actual emoji characters",
-        "- Do NOT use em-dashes",
-        f"- CONTEXT: The user is writing in {context}. Format output appropriately for that context." if context else "",
-        f"- TONE: Write in a {tone} tone." if tone else "",
-        "",
-        "Output ONLY the cleaned text. No intro, no outro, no explanation.",
-    ]))
 
 
 def _merge_segments(turns: list, merge_gap: float) -> list:
@@ -218,7 +163,6 @@ async def diarize(
         if max_speakers:  diarize_kwargs["max_speakers"] = max_speakers
 
         t0 = time.monotonic()
-        # Run pyannote in executor to avoid blocking the event loop
         loop = asyncio.get_running_loop()
         diarization = await loop.run_in_executor(
             None, lambda: _pipeline(wav_path, **diarize_kwargs))
@@ -226,10 +170,9 @@ async def diarize(
                  for seg, _, spk in diarization.itertracks(yield_label=True)]
         turns = _merge_segments(turns, merge_gap)
         print(f"[diarize] pyannote: {(time.monotonic()-t0)*1000:.0f}ms  {len(turns)} segments  merge_gap={merge_gap}s", file=sys.stderr, flush=True)
-        # all_samples is a plain list — safe to use after tmpdir is gone
 
     use_llm = bool(llm_url)
-    system_prompt = _build_system_prompt(context, tone) if use_llm else ""
+    system_prompt = build_system_prompt(context, tone) if use_llm else ""
     speaker_map: dict[str, str] = {}
 
     def speaker_label(spk: str) -> str:
@@ -251,8 +194,8 @@ async def diarize(
                     return
                 idx, start, spk, text = item
                 t = time.monotonic()
-                cleaned = _llm_call(text, llm_url, system_prompt)
-                print(f"[diarize] LLM  seg {idx+1}: {len(text.split()):3d}w → {(time.monotonic()-t)*1000:.0f}ms", file=sys.stderr, flush=True)
+                cleaned, _ = llm_call(text, llm_url, system_prompt)
+                print(f"[diarize] LLM  seg {idx+1}: {len(text.split()):3d}w -> {(time.monotonic()-t)*1000:.0f}ms", file=sys.stderr, flush=True)
                 result_queue.put({"type": "segment", "idx": idx, "start": start,
                                   "speaker": speaker_label(spk), "text": cleaned})
 

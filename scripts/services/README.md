@@ -21,6 +21,27 @@ Use `scripts/server-services.sh` from the repo root on the server:
 ./scripts/server-services.sh logs <service>     # follow journald logs
 ```
 
+## Client usage
+
+```bash
+# Basic transcription
+./scripts/transcribe.sh recording.m4a
+
+# With LLM cleanup, debug output, and glossary corrections
+./scripts/transcribe.sh recording.m4a -d -g ~/.whisper-glossary.json
+
+# Multi-speaker diarization
+./scripts/transcribe.sh recording.m4a --diarize --num-speakers 2
+
+# Re-run LLM cleanup on a saved raw transcript
+./scripts/transcribe.sh recording.m4a --from-raw recording.m4a.raw.txt
+
+# See all options
+./scripts/transcribe.sh --help
+```
+
+The diarize server returns streaming NDJSON — each segment is sent as soon as it's ready, so the client can show progress in real-time.
+
 ## Changing a service config
 
 1. Edit the relevant file in `scripts/services/`
@@ -28,6 +49,16 @@ Use `scripts/server-services.sh` from the repo root on the server:
 3. On the server: `git pull && ./scripts/server-services.sh install`
 
 Never edit `/etc/systemd/system/` directly — those are deployed copies.
+
+## Environment variables
+
+| Variable | Default | Used by |
+|---|---|---|
+| `DIARIZE_LOG` | `/tmp/diarize.log` | `diarize` service — log file path |
+| `DIARIZE_HOST` | `0.0.0.0` | `diarize` service — bind host |
+| `DIARIZE_PORT` | `7773` | `diarize` service — bind port |
+| `WHISPER_URL` | `http://localhost:7772` | `diarize` service — upstream Whisper |
+| `HF_TOKEN` | — | `diarize` service — HuggingFace token for pyannote |
 
 ## Secrets
 
@@ -40,7 +71,7 @@ Never edit `/etc/systemd/system/` directly — those are deployed copies.
 
 ```bash
 # Install Python deps for diarize service
-pip install fastapi uvicorn pyannote.audio torch
+pip install -r scripts/requirements.txt
 
 # Deploy and start all services
 ./scripts/server-services.sh install
