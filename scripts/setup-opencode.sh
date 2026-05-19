@@ -96,6 +96,36 @@ install_mavis_plugin() {
     log "mavis plugin installed"
 }
 
+# Configure oh-my-openagent to use MiniMax for all agents
+configure_ohmyopenagent_minimax() {
+    local target="$1"
+    log "Configuring oh-my-openagent to use MiniMax-M2.7..."
+    
+    local config_json='{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/oh-my-opencode.schema.json",
+  "agents": {
+    "sisyphus": { "model": "MiniMax-M2.7" },
+    "hephaestus": { "model": "MiniMax-M2.7" },
+    "prometheus": { "model": "MiniMax-M2.7" },
+    "metis": { "model": "MiniMax-M2.7" },
+    "oracle": { "model": "MiniMax-M2.7" },
+    "librarian": { "model": "MiniMax-M2.7" },
+    "explore": { "model": "MiniMax-M2.7" },
+    "multimodal-looker": { "model": "MiniMax-M2.7" },
+    "atlas": { "model": "MiniMax-M2.7" },
+    "build": { "model": "MiniMax-M2.7" },
+    "plan": { "model": "MiniMax-M2.7" },
+    "sisyphus-junior": { "model": "MiniMax-M2.7" }
+  }
+}'
+    
+    run_cmd "$target" "cat > ~/.opencode/oh-my-openagent.jsonc << 'OMAEOF'
+$config_json
+OMAEOF"
+    
+    log "oh-my-openagent configured with MiniMax-M2.7 for all agents"
+}
+
 # Create opencode server startup script (for headless operation)
 create_server_script() {
     local target="$1"
@@ -184,7 +214,7 @@ show_versions() {
     echo "=== $platform setup summary ==="
     echo "opencode: $(run_cmd "$target" "opencode --version" 2>/dev/null || echo "not found")"
     echo "oh-my-openagent: $(run_cmd "$target" "npx oh-my-openagent --version 2>/dev/null" || echo "not found")"
-    echo "plugins dir: $(run_cmd "$target" "ls ~/.opencode/plugins/ 2>/dev/null" || echo "empty")"
+    echo "oh-my-openagent config: $(run_cmd "$target" "cat ~/.opencode/oh-my-openagent.jsonc 2>/dev/null | head -5" || echo "not configured")"
     echo "server: $(run_cmd "$target" "~/.opencode/opencode-server.sh status 2>/dev/null" || echo "not configured")"
 }
 
@@ -204,10 +234,13 @@ setup_macbook() {
     # 4. Install mavis plugin
     install_mavis_plugin
 
-    # 5. Verify auth
+    # 5. Configure oh-my-openagent to use MiniMax
+    configure_ohmyopenagent_minimax
+
+    # 6. Verify auth
     verify_auth
 
-    # 6. Show versions
+    # 7. Show versions
     show_versions
 
     log "MacBook setup complete!"
@@ -230,13 +263,16 @@ setup_jetson() {
     # 4. Install mavis plugin
     install_mavis_plugin "$target"
 
-    # 5. Create server script
+    # 5. Configure oh-my-openagent to use MiniMax
+    configure_ohmyopenagent_minimax "$target"
+
+    # 6. Create server script
     create_server_script "$target"
 
-    # 6. Verify auth
+    # 7. Verify auth
     verify_auth "$target"
 
-    # 7. Show versions
+    # 8. Show versions
     show_versions "$target"
 
     log "Jetson setup complete!"
